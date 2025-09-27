@@ -51,7 +51,8 @@ import re
 import sys
 import time
 from io import BytesIO
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Iterable
+import html
 
 from PyPDF2 import PdfReader, PdfWriter
 
@@ -155,38 +156,47 @@ def extract_zoom(link: str, default: int = 16) -> int:
     return default
 
 
-def read_links_from_csv(path: str, max_links: Optional[int] = None) -> List[str]:
-    """Read Google Maps links from a CSV file.
+def read_records_from_csv(
+    path: str, max_records: Optional[int] = None
+) -> List[Tuple[str, Optional[str]]]:
+    """Read Google Maps links and optional labels from a CSV file.
 
-    The CSV is expected to have one URL per row.  Fields may be quoted,
-    including embedded newlines; this function uses ``csv.reader`` to handle
-    those cases correctly.
+    Each row of the CSV may contain a Google Maps URL in the first column
+    followed by a second column containing an arbitrary label.  Additional
+    columns in the row are ignored.  If the second column is empty or
+    absent, the label is returned as ``None``.
 
     Parameters
     ----------
     path : str
         Path to the CSV file containing the links.
-    max_links : int | None, optional
-        If given, only the first ``max_links`` rows will be returned.
+    max_records : int | None, optional
+        If given, only the first ``max_records`` rows will be returned.
 
     Returns
     -------
-    list[str]
-        A list of URLs.
+    list[tuple[str, Optional[str]]]
+        A list of tuples ``(url, label)``.  The label may be ``None`` if
+        not provided.
     """
-    links: list[str] = []
+    records: List[Tuple[str, Optional[str]]] = []
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         for row in reader:
             if not row:
                 continue
-            link = row[0].strip()
-            if not link:
+            url = row[0].strip()
+            if not url:
                 continue
-            links.append(link)
-            if max_links is not None and len(links) >= max_links:
+            label: Optional[str] = None
+            if len(row) > 1:
+                second = row[1].strip()
+                if second:
+                    label = second
+            records.append((url, label))
+            if max_records is not None and len(records) >= max_records:
                 break
-    return links
+    return records
 
 
 def get_chrome_driver(chromedriver_path: Optional[str]) -> webdriver.Chrome:
@@ -241,18 +251,21 @@ def print_map_pages(
     scale: Optional[float] = None,
     use_coordinates: bool = True,
     include_header: bool = True,
+    labels: Optional[List[Optional[str]]] = None,
+    inject_marker: bool = True,
 ) -> List[bytes]:
     """Generate PDF pages for each map link.
 
-    The driver navigates to each supplied link (or, if ``use_coordinates`` is
-    true, constructs a coordinate URL with an explicit marker) and captures
-    a PDF snapshot using Chrome's DevTools API.  When ``use_coordinates``
-    is true the place summary card and associated buttons are omitted from
-    the view.  A marker is added at the extracted latitude and longitude
-    via the ``q`` parameter so that the resulting map clearly indicates
-    the destination.  If ``include_header`` is true and the link contains
-    an address segment, that address will be printed at the top of the
-    page via the header template.
+    The driver navigates to each supplied link and captures a PDF
+    snapshot using Chrome's DevTools API.  When ``use_coordinates`` is
+    true the script extracts latitude, longitude and zoom from the link
+    and constructs a clean coordinate‑based URL to avoid the place card,
+    photo and action buttons.  The script may inject its own marker in
+    this mode (see module documentation for details).  If ``include_header``
+    is true and the link contains an address segment, that address will
+    be printed at the top of the page.  When ``labels`` are provided,
+    each label is displayed on the right side of the header for its
+    corresponding page.
 
     Parameters
     ----------
@@ -282,6 +295,19 @@ def print_map_pages(
         the place card, photo and action buttons.  If false, the original
         link is loaded.
 
+    labels : list[Optional[str]] | None, optional
+        An optional sequence of labels corresponding one‑to‑one with
+        ``links``.  Each label (if provided) is printed on the right side
+        of the header on its respective page.  Use ``None`` for entries
+        that should omit a label.
+
+    inject_marker : bool, optional
+        When ``True`` (default), a simple marker is injected into coordinate‑based
+        maps.  This marker consists of a small red dot with a white border
+        positioned at the centre of the viewport.  Setting this to ``False``
+        suppresses marker injection, which may be useful when the marker is
+        distracting or undesired.
+
     Returns
     -------
     list[bytes]
@@ -292,26 +318,52 @@ def print_map_pages(
     for idx, link in enumerate(links, start=1):
         # Determine which URL to load.  If use_coordinates is enabled and the
         # link yields valid coordinates, build a bare map URL to eliminate
-        # the place card.  Otherwise fall back to the original link.
+        # the place card.  Otherwise fall back to the original link.  We do
+        # not include the `q` parameter by default because it reintroduces
+        # the place summary card; instead we inject our own marker later.
         load_url = link
+        coords: Optional[Tuple[float, float]] = None
+        zoom: int = 16
         if use_coordinates:
             coords = extract_coordinates(link)
             if coords is not None:
                 lat, lon = coords
                 zoom = extract_zoom(link)
-                # Use the q parameter to place a marker at the coordinates.  The
-                # ll parameter keeps the map centered on the marker and the z
-                # parameter preserves the original zoom level.  Without q, the
-                # map view will omit the marker entirely.  See discussion in
-                # Stack Overflow: https://stackoverflow.com/a/42330709 and
-                # https://stackoverflow.com/a/2660326
-                load_url = (
-                    f"https://maps.google.com/maps?q={lat},{lon}&ll={lat},{lon}&z={zoom}"
-                )
+                load_url = f"https://maps.google.com/maps?ll={lat},{lon}&z={zoom}"
         print(f"Loading map {idx}/{total}: {load_url}")
         driver.get(load_url)
         # allow some time for the page and map tiles to load
         time.sleep(page_wait)
+        # Inject a simple marker at the map centre when using coordinate view.
+        # This avoids displaying the default place card and photo.  The marker
+        # consists of a small red dot with a white border, positioned at the
+        # centre of the viewport.  It is added only if a coordinate was
+        # successfully extracted and inject_marker is true.
+        if inject_marker and use_coordinates and coords is not None:
+            try:
+                script = """
+                    (function() {
+                        if (document.getElementById('custom-map-marker')) return;
+                        var marker = document.createElement('div');
+                        marker.id = 'custom-map-marker';
+                        marker.style.position = 'absolute';
+                        marker.style.width = '16px';
+                        marker.style.height = '16px';
+                        marker.style.backgroundColor = '#d9534f';
+                        marker.style.border = '2px solid white';
+                        marker.style.borderRadius = '50%';
+                        marker.style.top = '50%';
+                        marker.style.left = '50%';
+                        marker.style.transform = 'translate(-50%, -50%)';
+                        marker.style.zIndex = '10000';
+                        marker.style.pointerEvents = 'none';
+                        document.body.appendChild(marker);
+                    })();
+                """
+                driver.execute_script(script)
+            except Exception:
+                # If injection fails, silently ignore and proceed.
+                pass
         # Build print options.  Do not rotate the content; instead set the
         # paper size so that width > height for landscape.  Chrome will then
         # preserve the map's orientation without introducing extra white space.
@@ -325,11 +377,25 @@ def print_map_pages(
         }
         # Header/footer handling
         if include_header:
+            # Extract the human‑readable address from the URL (if present).
             address = extract_address(link)
-            if address:
+            # Obtain the corresponding label for this row, if provided.
+            label: Optional[str] = None
+            if labels is not None and idx - 1 < len(labels):
+                label = labels[idx - 1]
+            # Only build a header if at least one of address or label is not None.
+            if address or label:
+                safe_addr = html.escape(address) if address else ""
+                safe_label = html.escape(label) if label else ""
+                # Construct a flex container that places the address on the
+                # left and the label on the right.  Use double quotes around
+                # style attributes to avoid breaking the JSON string.
                 header_html = (
-                    f'<div style="font-size:12px; margin-left:40px; ' \
-                    f'margin-top:10px;">{address}</div>'
+                    '<div style="font-size:12px; margin-top:10px; display:flex; '
+                    'justify-content:space-between; width:100%;">'
+                    '<span style="margin-left:40px;">' + safe_addr + '</span>'
+                    '<span style="margin-right:40px;">' + safe_label + '</span>'
+                    '</div>'
                 )
                 print_opts["displayHeaderFooter"] = True
                 print_opts["headerTemplate"] = header_html
@@ -372,7 +438,12 @@ def main() -> None:
     parser.add_argument(
         "--input",
         required=True,
-        help="Path to the CSV file containing Google Maps links (one per row).",
+        help=(
+            "Path to the CSV file containing Google Maps links.  "
+            "Each row should contain a Google Maps URL in the first column.  "
+            "A second column may contain a label that will appear on the right "
+            "side of the header for that map."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -458,17 +529,32 @@ def main() -> None:
         "--no-header",
         action="store_true",
         help=(
-            "Do not include the address at the top of each page.  By default "
-            "the script extracts the address from the URL and prints it as a "
-            "header."
+            "Do not include the address or label at the top of each page.  "
+            "By default the script extracts the address from the URL and any "
+            "label from the CSV and prints them as a header."
+        ),
+    )
+    parser.add_argument(
+        "--no-marker",
+        action="store_true",
+        help=(
+            "Do not inject a custom marker into coordinate‑based maps.  "
+            "When this flag is supplied, the script will still use a "
+            "coordinate‑based URL to suppress the place card but will not "
+            "overlay its own marker."
         ),
     )
     args = parser.parse_args()
 
-    links = read_links_from_csv(args.input, max_links=args.limit)
-    if not links:
-        print("No links found in the input file.")
+    # Read links and optional labels from the input file.  Each row may
+    # contain a URL in the first column and a label in the second column.  Any
+    # additional columns are ignored.  Labels may be None if absent.
+    records = read_records_from_csv(args.input, max_records=args.limit)
+    if not records:
+        print("No valid links found in the input file.")
         sys.exit(1)
+    links: List[str] = [rec[0] for rec in records]
+    labels: List[Optional[str]] = [rec[1] for rec in records]
 
     # Initialize Chrome driver
     driver = get_chrome_driver(args.driver_path)
@@ -487,6 +573,8 @@ def main() -> None:
             scale=args.scale,
             use_coordinates=not args.use_original,
             include_header=not args.no_header,
+            labels=labels,
+            inject_marker=not args.no_marker,
         )
     finally:
         # Always quit the driver to release resources
