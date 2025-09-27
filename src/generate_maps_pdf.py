@@ -2,10 +2,11 @@
 generate_maps_pdf.py
 ====================
 
-This script reads a CSV file containing Google Map links (one per row), extracts
-the geographic coordinates from each link, loads an uncluttered map view for
-those coordinates, and prints that view to PDF.  All individual PDF pages are
-combined into a single, landscape‑oriented PDF.
+This script reads a CSV file containing Google Map links (one per row),
+extracts the geographic coordinates from each link, loads an uncluttered
+map view for those coordinates with a marker, and prints that view to
+PDF.  All individual PDF pages are combined into a single,
+landscape‑oriented PDF.
 
 Usage
 -----
@@ -34,10 +35,12 @@ Limitations
 * Printing relies on Chrome's headless ``printToPDF`` devtools API, which
   usually works without launching a window.  Nonetheless, network or API
   changes from Google may affect the results.
-* Because the script opens a bare map centered on the extracted latitude and
-  longitude (using the ``ll`` parameter), there is no place summary panel to
-  collapse.  This replicates the effect of collapsing the side panel in
-  an interactive session.
+  * Because the script opens a clean map centered on the extracted
+  latitude and longitude (using the ``q`` and ``ll`` parameters), there
+  is no place summary panel to collapse.  A marker indicates the
+  location on the map.  This replicates the effect of collapsing the
+  side panel in an interactive session while still showing the place
+  marker.
 """
 
 import argparse
@@ -48,6 +51,7 @@ import re
 import sys
 import time
 from io import BytesIO
+from typing import List, Optional, Tuple
 
 from PyPDF2 import PdfReader, PdfWriter
 
@@ -56,12 +60,43 @@ from PyPDF2 import PdfReader, PdfWriter
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
 except ImportError as exc:  # pragma: no cover
+    # When selenium isn't available we set these to None; this allows the
+    # script to emit a helpful error at runtime rather than failing on import.
     webdriver = None  # type: ignore
     Options = None  # type: ignore
+    Service = None  # type: ignore
 
 
-def extract_coordinates(link: str) -> tuple[float, float] | None:
+def extract_address(link: str) -> Optional[str]:
+    """Extract a human‑readable address from a Google Maps place URL.
+
+    Google place URLs generally have the form
+    ``https://www.google.com/maps/place/<address>/<more>`` where the
+    ``<address>`` segment uses ``+`` as a space separator and ``%2C`` for
+    commas.  This function decodes that segment into a more readable form.
+
+    Parameters
+    ----------
+    link : str
+        A Google Maps URL.
+
+    Returns
+    -------
+    Optional[str]
+        The extracted address, or ``None`` if it cannot be determined.
+    """
+    match = re.search(r"/place/([^/@]+)", link)
+    if not match:
+        return None
+    segment = match.group(1)
+    # Decode plus signs and percent‑encoded commas
+    addr = segment.replace("+", " ").replace("%2C", ",")
+    return addr
+
+
+def extract_coordinates(link: str) -> Optional[Tuple[float, float]]:
     """Extract latitude and longitude from a Google Maps link.
 
     The function first looks for an ``@lat,lon`` pattern and falls back to
@@ -120,7 +155,7 @@ def extract_zoom(link: str, default: int = 16) -> int:
     return default
 
 
-def read_links_from_csv(path: str, max_links: int | None = None) -> list[str]:
+def read_links_from_csv(path: str, max_links: Optional[int] = None) -> List[str]:
     """Read Google Maps links from a CSV file.
 
     The CSV is expected to have one URL per row.  Fields may be quoted,
@@ -154,7 +189,7 @@ def read_links_from_csv(path: str, max_links: int | None = None) -> list[str]:
     return links
 
 
-def get_chrome_driver(chromedriver_path: str | None) -> webdriver.Chrome:
+def get_chrome_driver(chromedriver_path: Optional[str]) -> webdriver.Chrome:
     """Create a headless Chrome driver configured for PDF printing.
 
     Parameters
@@ -180,23 +215,44 @@ def get_chrome_driver(chromedriver_path: str | None) -> webdriver.Chrome:
     chrome_options.add_argument("--disable-dev-shm-usage")
     # Improve performance of PDF printing
     chrome_options.add_argument("--print-to-pdf-no-header")
-    driver = webdriver.Chrome(executable_path=chromedriver_path, options=chrome_options)
+    # Selenium 4 removed the ``executable_path`` argument from the
+    # ``webdriver.Chrome`` constructor in favour of the ``Service`` class.
+    # If the caller provided a driver path, we create a Service for it; otherwise
+    # the default Service will look up ``chromedriver`` on the PATH.
+    if Service is None:
+        raise ImportError(
+            "Selenium is not installed.  Install it with `pip install selenium`."
+        )
+    if chromedriver_path:
+        service = Service(executable_path=chromedriver_path)
+    else:
+        service = Service()
+    driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
 
 def print_map_pages(
-    links: list[str],
+    links: List[str],
     driver: webdriver.Chrome,
     orientation_landscape: bool = True,
     page_wait: float = 5.0,
-) -> list[bytes]:
+    paper_width: Optional[float] = None,
+    paper_height: Optional[float] = None,
+    scale: Optional[float] = None,
+    use_coordinates: bool = True,
+    include_header: bool = True,
+) -> List[bytes]:
     """Generate PDF pages for each map link.
 
-    Each link is converted into a bare map view (without the place card) by
-    extracting its coordinates and zoom level and constructing a URL of the
-    form ``https://maps.google.com/maps?ll=lat,lon&z=zoom``.  The driver
-    navigates to this URL and uses the Chrome DevTools API to capture a
-    PDF snapshot.
+    The driver navigates to each supplied link (or, if ``use_coordinates`` is
+    true, constructs a coordinate URL with an explicit marker) and captures
+    a PDF snapshot using Chrome's DevTools API.  When ``use_coordinates``
+    is true the place summary card and associated buttons are omitted from
+    the view.  A marker is added at the extracted latitude and longitude
+    via the ``q`` parameter so that the resulting map clearly indicates
+    the destination.  If ``include_header`` is true and the link contains
+    an address segment, that address will be printed at the top of the
+    page via the header template.
 
     Parameters
     ----------
@@ -208,41 +264,90 @@ def print_map_pages(
         Whether to print pages in landscape orientation, by default True.
     page_wait : float, optional
         Seconds to wait after loading each map before printing, by default 5.0.
+    paper_width : float or None, optional
+        Width of the PDF page in inches.  If ``None``, the default paper size
+        is used by Chrome.  When provided together with ``paper_height`` this
+        controls how the map is scaled on the page.
+    paper_height : float or None, optional
+        Height of the PDF page in inches.  See ``paper_width``.
+    scale : float or None, optional
+        A scaling factor between 0.1 and 2.0 used by the Chrome ``printToPDF``
+        command.  Increasing the scale zooms in on the content, decreasing
+        zooms out.  If ``None``, Chrome chooses a default.
+
+    use_coordinates : bool, optional
+        If true (default), the script attempts to extract latitude, longitude
+        and zoom level from each link and loads a clean coordinate‑based map
+        (``https://maps.google.com/maps?ll=lat,lon&z=zoom``).  This removes
+        the place card, photo and action buttons.  If false, the original
+        link is loaded.
 
     Returns
     -------
     list[bytes]
         A list containing the PDF data (as bytes) for each map page.
     """
-    pdf_pages: list[bytes] = []
+    pdf_pages: List[bytes] = []
+    total = len(links)
     for idx, link in enumerate(links, start=1):
-        coords = extract_coordinates(link)
-        if coords is None:
-            print(f"[WARN] Could not extract coordinates from link {idx}: {link}")
-            continue
-        lat, lon = coords
-        zoom = extract_zoom(link)
-        map_url = f"https://maps.google.com/maps?ll={lat},{lon}&z={zoom}"
-        print(f"Loading map {idx}/{len(links)}: {map_url}")
-        driver.get(map_url)
-        # allow some time for map tiles to load
+        # Determine which URL to load.  If use_coordinates is enabled and the
+        # link yields valid coordinates, build a bare map URL to eliminate
+        # the place card.  Otherwise fall back to the original link.
+        load_url = link
+        if use_coordinates:
+            coords = extract_coordinates(link)
+            if coords is not None:
+                lat, lon = coords
+                zoom = extract_zoom(link)
+                # Use the q parameter to place a marker at the coordinates.  The
+                # ll parameter keeps the map centered on the marker and the z
+                # parameter preserves the original zoom level.  Without q, the
+                # map view will omit the marker entirely.  See discussion in
+                # Stack Overflow: https://stackoverflow.com/a/42330709 and
+                # https://stackoverflow.com/a/2660326
+                load_url = (
+                    f"https://maps.google.com/maps?q={lat},{lon}&ll={lat},{lon}&z={zoom}"
+                )
+        print(f"Loading map {idx}/{total}: {load_url}")
+        driver.get(load_url)
+        # allow some time for the page and map tiles to load
         time.sleep(page_wait)
-        # Use the Chrome DevTools Protocol to print to PDF
+        # Build print options.  Do not rotate the content; instead set the
+        # paper size so that width > height for landscape.  Chrome will then
+        # preserve the map's orientation without introducing extra white space.
         print_opts = {
-            "landscape": orientation_landscape,
+            "landscape": False,
             "marginTop": 0,
             "marginBottom": 0,
             "marginLeft": 0,
             "marginRight": 0,
             "printBackground": True,
         }
+        # Header/footer handling
+        if include_header:
+            address = extract_address(link)
+            if address:
+                header_html = (
+                    f'<div style="font-size:12px; margin-left:40px; ' \
+                    f'margin-top:10px;">{address}</div>'
+                )
+                print_opts["displayHeaderFooter"] = True
+                print_opts["headerTemplate"] = header_html
+                print_opts["footerTemplate"] = ""
+        # Apply custom paper size if provided.  Width/height are in inches.
+        if paper_width is not None and paper_height is not None:
+            print_opts["paperWidth"] = paper_width
+            print_opts["paperHeight"] = paper_height
+        # Apply scale if provided (allowed range is 0.1–2.0)
+        if scale is not None:
+            print_opts["scale"] = scale
         result = driver.execute_cdp_cmd("Page.printToPDF", print_opts)  # type: ignore
         pdf_data = base64.b64decode(result["data"])
         pdf_pages.append(pdf_data)
     return pdf_pages
 
 
-def merge_pdf_pages(pages: list[bytes], output_path: str) -> None:
+def merge_pdf_pages(pages: List[bytes], output_path: str) -> None:
     """Merge multiple PDF pages into a single PDF file.
 
     Parameters
@@ -294,7 +399,69 @@ def main() -> None:
     parser.add_argument(
         "--portrait",
         action="store_true",
-        help="Print pages in portrait orientation instead of landscape.",
+        help=(
+            "Deprecated: orientation is now controlled by paperWidth and "
+            "paperHeight.  This flag no longer has any effect."
+        ),
+    )
+    parser.add_argument(
+        "--window-width",
+        type=int,
+        default=1920,
+        help="Width of the browser window in pixels (affects map framing).",
+    )
+    parser.add_argument(
+        "--window-height",
+        type=int,
+        default=1080,
+        help="Height of the browser window in pixels (affects map framing).",
+    )
+    parser.add_argument(
+        "--paper-width",
+        type=float,
+        default=11.0,
+        help=(
+            "Width of the PDF pages in inches. Default 11.0 (landscape Letter). "
+            "Use together with --paper-height."
+        ),
+    )
+    parser.add_argument(
+        "--paper-height",
+        type=float,
+        default=8.5,
+        help=(
+            "Height of the PDF pages in inches. Default 8.5 (landscape Letter). "
+            "Use together with --paper-width."
+        ),
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help=(
+            "Scale factor for printing (0.1–2.0).  Adjust this if maps appear "
+            "too zoomed in or out in the PDF."
+        ),
+    )
+    parser.add_argument(
+        "--use-original",
+        action="store_true",
+        help=(
+            "Load and print the original Google Maps link instead of building "
+            "a coordinate‑based URL.  Use this if you want to include the "
+            "place summary card and action buttons.  Default is to omit the "
+            "place card by using the coordinate view."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-header",
+        action="store_true",
+        help=(
+            "Do not include the address at the top of each page.  By default "
+            "the script extracts the address from the URL and prints it as a "
+            "header."
+        ),
     )
     args = parser.parse_args()
 
@@ -305,12 +472,21 @@ def main() -> None:
 
     # Initialize Chrome driver
     driver = get_chrome_driver(args.driver_path)
+    # Set the browser window size to better reflect the on‑screen view.  A larger
+    # viewport will produce a PDF that matches the zoom level you see when
+    # visiting maps in a desktop browser.
+    driver.set_window_size(args.window_width, args.window_height)
     try:
         pages = print_map_pages(
             links,
             driver,
             orientation_landscape=not args.portrait,
             page_wait=args.wait,
+            paper_width=args.paper_width,
+            paper_height=args.paper_height,
+            scale=args.scale,
+            use_coordinates=not args.use_original,
+            include_header=not args.no_header,
         )
     finally:
         # Always quit the driver to release resources
