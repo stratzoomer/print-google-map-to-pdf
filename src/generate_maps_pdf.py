@@ -448,7 +448,12 @@ def main() -> None:
     parser.add_argument(
         "--output",
         required=True,
-        help="Path to the output PDF file.",
+        help=(
+            "Path to the output directory.  The script will produce one PDF "
+            "per unique label found in the input file, using the label as "
+            "the file name.  If the directory does not exist it will be "
+            "created."
+        ),
     )
     parser.add_argument(
         "--driver-path",
@@ -556,37 +561,66 @@ def main() -> None:
     links: List[str] = [rec[0] for rec in records]
     labels: List[Optional[str]] = [rec[1] for rec in records]
 
-    # Initialize Chrome driver
+    # Prepare the output directory.  If the provided output path is not an
+    # existing directory, attempt to create it.  This directory will hold
+    # one PDF per unique label (or "maps" for unlabeled rows).
+    output_dir = args.output
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Initialise the Chrome driver once and reuse it across groups to
+    # minimise startup overhead.
     driver = get_chrome_driver(args.driver_path)
-    # Set the browser window size to better reflect the on‑screen view.  A larger
-    # viewport will produce a PDF that matches the zoom level you see when
-    # visiting maps in a desktop browser.
     driver.set_window_size(args.window_width, args.window_height)
     try:
-        pages = print_map_pages(
-            links,
-            driver,
-            orientation_landscape=not args.portrait,
-            page_wait=args.wait,
-            paper_width=args.paper_width,
-            paper_height=args.paper_height,
-            scale=args.scale,
-            use_coordinates=not args.use_original,
-            include_header=not args.no_header,
-            labels=labels,
-            inject_marker=not args.no_marker,
-        )
+        # Group records by their label.  Because the input is sorted on the
+        # second field, we can accumulate consecutive rows with the same
+        # label into a single group and produce one PDF for each.
+        idx = 0
+        total_groups = 0
+        while idx < len(records):
+            current_label = records[idx][1]
+            group_links: List[str] = []
+            group_labels: List[Optional[str]] = []
+            # Collect all consecutive records sharing the same label
+            while idx < len(records) and records[idx][1] == current_label:
+                group_links.append(records[idx][0])
+                group_labels.append(records[idx][1])
+                idx += 1
+            # Generate PDF pages for this group
+            pages = print_map_pages(
+                group_links,
+                driver,
+                orientation_landscape=not args.portrait,
+                page_wait=args.wait,
+                paper_width=args.paper_width,
+                paper_height=args.paper_height,
+                scale=args.scale,
+                use_coordinates=not args.use_original,
+                include_header=not args.no_header,
+                labels=group_labels,
+                inject_marker=not args.no_marker,
+            )
+            if pages:
+                # Sanitize the label to construct a safe filename.  Non‑alphanumeric
+                # characters are replaced with underscores.  If the label is
+                # empty or None, use a generic name "maps".
+                if current_label:
+                    base_name = re.sub(r"[^A-Za-z0-9]+", "_", current_label.strip())
+                    if not base_name:
+                        base_name = "maps"
+                else:
+                    base_name = "maps"
+                output_path = os.path.join(output_dir, f"{base_name}.pdf")
+                merge_pdf_pages(pages, output_path)
+                print(f"Successfully wrote {len(pages)} page(s) to '{output_path}'.")
+                total_groups += 1
+        if total_groups == 0:
+            print("No PDF pages were created; aborting.")
+            sys.exit(1)
     finally:
         # Always quit the driver to release resources
         driver.quit()
-
-    if not pages:
-        print("No PDF pages were created; aborting.")
-        sys.exit(1)
-
-    # Merge pages into a single PDF
-    merge_pdf_pages(pages, args.output)
-    print(f"Successfully wrote {len(pages)} page(s) to '{args.output}'.")
 
 
 if __name__ == "__main__":
