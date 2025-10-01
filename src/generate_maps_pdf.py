@@ -158,7 +158,7 @@ def extract_zoom(link: str, default: int = 16) -> int:
 
 def read_records_from_csv(
     path: str, max_records: Optional[int] = None
-) -> List[Tuple[str, Optional[str]]]:
+) -> List[Tuple[str, Optional[str], Optional[str]]]:
     """Read map links and optional labels from a CSV file.
 
     This helper function supports two CSV formats:
@@ -182,11 +182,11 @@ def read_records_from_csv(
 
     Returns
     -------
-    list[tuple[str, Optional[str]]]
-        A list of ``(url, label)`` tuples.  The label may be ``None`` if not
-        provided.
+    list[tuple[str, Optional[str], Optional[str]]]
+        A list of ``(url, label, bags)`` tuples.  ``label`` and ``bags`` may
+        be ``None`` if not provided.
     """
-    records: List[Tuple[str, Optional[str]]] = []
+    records: List[Tuple[str, Optional[str], Optional[str]]] = []
     # Read all rows first so that we can inspect the header row.  Using a
     # dedicated list avoids complications with the csv reader state.
     with open(path, newline="", encoding="utf-8") as f:
@@ -199,12 +199,14 @@ def read_records_from_csv(
     header = [cell.strip() for cell in rows[0]]
     # Normalise header names for comparison
     header_lower = [h.lower() for h in header]
-    # Known field names for map link and label
+    # Known field names for map link, label and bag count
     link_field_names = {"map link", "maplink", "map_link"}
     label_field_names = {"delivery route", "deliveryroute", "delivery_route", "label"}
+    bags_field_names = {"number of bags", "numberofbags", "number_of_bags", "bags"}
     has_header = any(name in header_lower for name in link_field_names)
     link_index: Optional[int] = None
     label_index: Optional[int] = None
+    bags_index: Optional[int] = None
     start_idx = 0
     if has_header:
         start_idx = 1
@@ -214,6 +216,8 @@ def read_records_from_csv(
                 link_index = i
             if h in label_field_names and label_index is None:
                 label_index = i
+            if h in bags_field_names and bags_index is None:
+                bags_index = i
         # If we don't find a link index in the header, treat the first
         # column as the link.
         if link_index is None:
@@ -222,6 +226,7 @@ def read_records_from_csv(
         # Positional format: first column is link, second column is label
         link_index = 0
         label_index = 1
+        bags_index = 2
     # Process each data row starting from start_idx
     for row in rows[start_idx:]:
         if not row:
@@ -238,7 +243,13 @@ def read_records_from_csv(
             label_raw = row[label_index].strip()
             if label_raw:
                 label = label_raw
-        records.append((url, label))
+        # Extract number of bags, if any
+        bags: Optional[str] = None
+        if bags_index is not None and bags_index < len(row):
+            bags_raw = row[bags_index].strip()
+            if bags_raw:
+                bags = bags_raw
+        records.append((url, label, bags))
         if max_records is not None and len(records) >= max_records:
             break
     return records
@@ -298,6 +309,7 @@ def print_map_pages(
     include_header: bool = True,
     labels: Optional[List[Optional[str]]] = None,
     inject_marker: bool = True,
+    bag_counts: Optional[List[Optional[str]]] = None,
 ) -> List[bytes]:
     """Generate PDF pages for each map link.
 
@@ -343,8 +355,14 @@ def print_map_pages(
     labels : list[Optional[str]] | None, optional
         An optional sequence of labels corresponding one‑to‑one with
         ``links``.  Each label (if provided) is printed on the right side
-        of the header on its respective page.  Use ``None`` for entries
-        that should omit a label.
+        of the header on its respective page along with the number of bags.
+        Use ``None`` for entries that should omit the label.
+
+    bag_counts : list[Optional[str]] | None, optional
+        Optional sequence of bag counts corresponding one‑to‑one with
+        ``links``.  Each entry may be ``None`` if the bag count is not
+        provided.  When present, the bag count is displayed after the
+        delivery route in the header as ``Number of Bags: <count>``.
 
     inject_marker : bool, optional
         When ``True`` (default), a simple marker is injected into coordinate‑based
@@ -424,22 +442,32 @@ def print_map_pages(
         if include_header:
             # Extract the human‑readable address from the URL (if present).
             address = extract_address(link)
-            # Obtain the corresponding label for this row, if provided.
+            # Obtain the corresponding label and bag count for this row, if provided.
             label: Optional[str] = None
+            bag: Optional[str] = None
             if labels is not None and idx - 1 < len(labels):
                 label = labels[idx - 1]
-            # Only build a header if at least one of address or label is not None.
-            if address or label:
+            if bag_counts is not None and idx - 1 < len(bag_counts):
+                bag = bag_counts[idx - 1]
+            # Only build a header if at least one of address, label or bag is not None.
+            if address or label or bag:
                 safe_addr = html.escape(address) if address else ""
-                safe_label = html.escape(label) if label else ""
-                # Construct a flex container that places the address on the
-                # left and the label on the right.  Use double quotes around
-                # style attributes to avoid breaking the JSON string.
+                # Build the right-hand text.  Each component is prefixed with a
+                # descriptive label.  Use non-breaking spaces to separate the
+                # components so they do not collapse during rendering.
+                right_parts: List[str] = []
+                if label:
+                    safe_label = html.escape(label)
+                    right_parts.append("Delivery Route: " + safe_label)
+                if bag:
+                    safe_bag = html.escape(bag)
+                    right_parts.append("Number of Bags: " + safe_bag)
+                right_text = "&nbsp;&nbsp;".join(right_parts) if right_parts else ""
                 header_html = (
                     '<div style="font-size:12px; margin-top:10px; display:flex; '
                     'justify-content:space-between; width:100%;">'
                     '<span style="margin-left:40px;">' + safe_addr + '</span>'
-                    '<span style="margin-right:40px;">' + safe_label + '</span>'
+                    '<span style="margin-right:40px;">' + right_text + '</span>'
                     '</div>'
                 )
                 print_opts["displayHeaderFooter"] = True
@@ -604,7 +632,8 @@ def main() -> None:
         print("No valid links found in the input file.")
         sys.exit(1)
     links: List[str] = [rec[0] for rec in records]
-    labels: List[Optional[str]] = [rec[1] for rec in records]
+    labels_list: List[Optional[str]] = [rec[1] for rec in records]
+    bags_list: List[Optional[str]] = [rec[2] for rec in records]
 
     # Prepare the output directory.  If the provided output path is not an
     # existing directory, attempt to create it.  This directory will hold
@@ -627,10 +656,12 @@ def main() -> None:
             current_label = records[idx][1]
             group_links: List[str] = []
             group_labels: List[Optional[str]] = []
+            group_bags: List[Optional[str]] = []
             # Collect all consecutive records sharing the same label
             while idx < len(records) and records[idx][1] == current_label:
                 group_links.append(records[idx][0])
                 group_labels.append(records[idx][1])
+                group_bags.append(records[idx][2])
                 idx += 1
             # Generate PDF pages for this group
             pages = print_map_pages(
@@ -645,6 +676,7 @@ def main() -> None:
                 include_header=not args.no_header,
                 labels=group_labels,
                 inject_marker=not args.no_marker,
+                bag_counts=group_bags,
             )
             if pages:
                 # Sanitize the label to construct a safe filename.  Non‑alphanumeric
