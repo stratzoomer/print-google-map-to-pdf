@@ -230,6 +230,10 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
     # Create a white background image
     img = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), "white")
     draw = ImageDraw.Draw(img)
+    # Use a lighter border colour for rectangles.  This produces a
+    # subtler border on the printed PDF akin to the sample form.  A
+    # tuple of three equal RGB values yields a shade of grey.
+    border_color = (150, 150, 150)
     # Draw top horizontal bar
     bar_height = 4
     draw.rectangle([(0, 40), (PAGE_WIDTH, 40 + bar_height)], fill=(230, 230, 230))
@@ -246,7 +250,10 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
         box_width = field_width if not small_box else 80
         # adjust x_field for small boxes if specified
         field_x = x_field if not small_box else x_field
-        draw.rectangle([ (field_x, y_pos - 6), (field_x + box_width, y_pos - 6 + box_height) ], outline=(0, 0, 0), width=1)
+        draw.rectangle([
+            (field_x, y_pos - 6),
+            (field_x + box_width, y_pos - 6 + box_height),
+        ], outline=border_color, width=1)
         # value text
         text_offset_y = y_pos - 6 + 4
         draw.text((field_x + 4, text_offset_y), value, font=fonts["value"], fill=(0, 0, 0))
@@ -257,14 +264,28 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
     draw.text((36, y), "Order #", font=fonts["label"], fill=(0, 0, 0))
     order_field_x = 110
     order_field_width = 80
-    draw.rectangle([(order_field_x, y - 6), (order_field_x + order_field_width, y - 6 + 24)], outline=(0, 0, 0), width=1)
+    draw.rectangle(
+        [
+            (order_field_x, y - 6),
+            (order_field_x + order_field_width, y - 6 + 24),
+        ],
+        outline=border_color,
+        width=1,
+    )
     draw.text((order_field_x + 4, y - 6 + 4), record.get("order_no", ""), font=fonts["value"], fill=(0, 0, 0))
     # Draw Amount Supporting label and field
     amt_label_x = 230
     draw.multiline_text((amt_label_x, y), "Amount Supporting\nBSA Troop 1865", font=fonts["label"], fill=(0, 0, 0), spacing=2)
     amt_field_x = 430
     amt_field_width = 100
-    draw.rectangle([(amt_field_x, y - 6), (amt_field_x + amt_field_width, y - 6 + 24)], outline=(0, 0, 0), width=1)
+    draw.rectangle(
+        [
+            (amt_field_x, y - 6),
+            (amt_field_x + amt_field_width, y - 6 + 24),
+        ],
+        outline=border_color,
+        width=1,
+    )
     draw.text((amt_field_x + 4, y - 6 + 4), record.get("amount_support", ""), font=fonts["value"], fill=(0, 0, 0))
     y += 40
 
@@ -287,7 +308,14 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
     instructions_width = PAGE_WIDTH - instructions_x - 36
     instructions_height = 180
     # Draw the instruction box
-    draw.rectangle([(instructions_x, instructions_y), (instructions_x + instructions_width, instructions_y + instructions_height)], outline=(0, 0, 0), width=1)
+    draw.rectangle(
+        [
+            (instructions_x, instructions_y),
+            (instructions_x + instructions_width, instructions_y + instructions_height),
+        ],
+        outline=border_color,
+        width=1,
+    )
     # Wrap and draw instructions text
     instructions = record.get("instructions", "")
     if instructions:
@@ -322,14 +350,28 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
     draw.text((36, y), "Route", font=fonts["label"], fill=(0, 0, 0))
     route_field_x = 100
     route_field_width = 140
-    draw.rectangle([(route_field_x, y - 6), (route_field_x + route_field_width, y - 6 + 24)], outline=(0, 0, 0), width=1)
+    draw.rectangle(
+        [
+            (route_field_x, y - 6),
+            (route_field_x + route_field_width, y - 6 + 24),
+        ],
+        outline=border_color,
+        width=1,
+    )
     draw.text((route_field_x + 4, y - 6 + 4), record.get("route", ""), font=fonts["value"], fill=(0, 0, 0))
     # ID placed to the right of the route field
     id_label_x = route_field_x + route_field_width + 40
     draw.text((id_label_x, y), "ID", font=fonts["label"], fill=(0, 0, 0))
     id_field_x = id_label_x + 30
     id_field_width = 60
-    draw.rectangle([(id_field_x, y - 6), (id_field_x + id_field_width, y - 6 + 24)], outline=(0, 0, 0), width=1)
+    draw.rectangle(
+        [
+            (id_field_x, y - 6),
+            (id_field_x + id_field_width, y - 6 + 24),
+        ],
+        outline=border_color,
+        width=1,
+    )
     draw.text((id_field_x + 4, y - 6 + 4), str(record.get("id", "")), font=fonts["value"], fill=(0, 0, 0))
     y += 40
 
@@ -483,15 +525,15 @@ def save_combined_forms_and_maps(
             writer = PdfWriter()
             num_records = len(group_records)
             for i in range(num_records):
-                # Add order form page
-                order_reader = PdfReader(BytesIO(order_pages[i]))
-                for page in order_reader.pages:
-                    writer.add_page(page)
-                # Add corresponding map page (if available)
+                # Add corresponding map page first (landscape)
                 if i < len(map_pages):
                     map_reader = PdfReader(BytesIO(map_pages[i]))
                     for page in map_reader.pages:
                         writer.add_page(page)
+                # Then add the order form page (portrait)
+                order_reader = PdfReader(BytesIO(order_pages[i]))
+                for page in order_reader.pages:
+                    writer.add_page(page)
             # Construct a safe base name for the output file
             if current_route:
                 base_name = re.sub(r"[^A-Za-z0-9]+", "_", current_route.strip())
