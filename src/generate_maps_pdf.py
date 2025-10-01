@@ -159,43 +159,88 @@ def extract_zoom(link: str, default: int = 16) -> int:
 def read_records_from_csv(
     path: str, max_records: Optional[int] = None
 ) -> List[Tuple[str, Optional[str]]]:
-    """Read Google Maps links and optional labels from a CSV file.
+    """Read map links and optional labels from a CSV file.
 
-    Each row of the CSV may contain a Google Maps URL in the first column
-    followed by a second column containing an arbitrary label.  Additional
-    columns in the row are ignored.  If the second column is empty or
-    absent, the label is returned as ``None``.
+    This helper function supports two CSV formats:
+
+    1. **Positional format** – each row contains the map URL in the first
+       column and an optional label in the second column.  Any additional
+       columns are ignored.
+    2. **Header format** – the first row contains column names.  When the
+       header row contains ``"Map Link"`` and ``"Delivery Route"`` (case
+       insensitive), those fields are used to extract the URL and label.
+
+    In both cases, rows with an empty or missing URL are skipped, and the
+    returned label is ``None`` when absent.
 
     Parameters
     ----------
     path : str
-        Path to the CSV file containing the links.
+        Path to the CSV file.
     max_records : int | None, optional
-        If given, only the first ``max_records`` rows will be returned.
+        If given, only the first ``max_records`` records are returned.
 
     Returns
     -------
     list[tuple[str, Optional[str]]]
-        A list of tuples ``(url, label)``.  The label may be ``None`` if
-        not provided.
+        A list of ``(url, label)`` tuples.  The label may be ``None`` if not
+        provided.
     """
     records: List[Tuple[str, Optional[str]]] = []
+    # Read all rows first so that we can inspect the header row.  Using a
+    # dedicated list avoids complications with the csv reader state.
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        for row in reader:
-            if not row:
-                continue
-            url = row[0].strip()
-            if not url:
-                continue
-            label: Optional[str] = None
-            if len(row) > 1:
-                second = row[1].strip()
-                if second:
-                    label = second
-            records.append((url, label))
-            if max_records is not None and len(records) >= max_records:
-                break
+        rows = list(reader)
+    if not rows:
+        return records
+    # Determine whether the first row is a header.  We treat it as a header
+    # when it contains known field names for the URL and label.
+    header = [cell.strip() for cell in rows[0]]
+    # Normalise header names for comparison
+    header_lower = [h.lower() for h in header]
+    # Known field names for map link and label
+    link_field_names = {"map link", "maplink", "map_link"}
+    label_field_names = {"delivery route", "deliveryroute", "delivery_route", "label"}
+    has_header = any(name in header_lower for name in link_field_names)
+    link_index: Optional[int] = None
+    label_index: Optional[int] = None
+    start_idx = 0
+    if has_header:
+        start_idx = 1
+        # Identify the indices of the link and label fields (case insensitive)
+        for i, h in enumerate(header_lower):
+            if h in link_field_names and link_index is None:
+                link_index = i
+            if h in label_field_names and label_index is None:
+                label_index = i
+        # If we don't find a link index in the header, treat the first
+        # column as the link.
+        if link_index is None:
+            link_index = 0
+    else:
+        # Positional format: first column is link, second column is label
+        link_index = 0
+        label_index = 1
+    # Process each data row starting from start_idx
+    for row in rows[start_idx:]:
+        if not row:
+            continue
+        # Extract URL
+        url = ""
+        if link_index is not None and link_index < len(row):
+            url = row[link_index].strip()
+        if not url:
+            continue
+        # Extract label, if any
+        label: Optional[str] = None
+        if label_index is not None and label_index < len(row):
+            label_raw = row[label_index].strip()
+            if label_raw:
+                label = label_raw
+        records.append((url, label))
+        if max_records is not None and len(records) >= max_records:
+            break
     return records
 
 
