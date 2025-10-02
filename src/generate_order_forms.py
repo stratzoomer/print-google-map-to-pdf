@@ -500,27 +500,41 @@ def save_combined_forms_and_maps(
                 group_bags.append(rec.get("bags", ""))
                 idx += 1
             # Generate map pages for this group
-            map_pages: List[bytes] = gmp.print_map_pages(
-                group_links,
-                driver,
-                orientation_landscape=True,
-                page_wait=wait,
-                paper_width=paper_width,
-                paper_height=paper_height,
-                scale=scale,
-                use_coordinates=not use_original,
-                include_header=not no_header,
-                labels=group_labels,
-                inject_marker=not no_marker,
-                bag_counts=group_bags,
-            )
+            try:
+                map_pages: List[bytes] = gmp.print_map_pages(
+                    group_links,
+                    driver,
+                    orientation_landscape=True,
+                    page_wait=wait,
+                    paper_width=paper_width,
+                    paper_height=paper_height,
+                    scale=scale,
+                    use_coordinates=not use_original,
+                    include_header=not no_header,
+                    labels=group_labels,
+                    inject_marker=not no_marker,
+                    bag_counts=group_bags,
+                )
+            except Exception as e:
+                # Provide additional context for map printing errors
+                first_id = group_records[0].get("id") if group_records else "?"
+                print(
+                    f"Error generating map pages for route '{current_route}' starting at record ID {first_id}: {e}"
+                )
+                raise
             # Generate order form pages for this group
             order_pages: List[bytes] = []
             for rec in group_records:
-                img = draw_order_form(rec, fonts)
-                buf = BytesIO()
-                img.save(buf, format="PDF")
-                order_pages.append(buf.getvalue())
+                try:
+                    img = draw_order_form(rec, fonts)
+                    buf = BytesIO()
+                    img.save(buf, format="PDF")
+                    order_pages.append(buf.getvalue())
+                except Exception as e:
+                    print(
+                        f"Error generating order form for record ID {rec.get('id')} on route '{current_route}': {e}"
+                    )
+                    raise
             # Merge pages: order form followed by map for each record
             writer = PdfWriter()
             num_records = len(group_records)
