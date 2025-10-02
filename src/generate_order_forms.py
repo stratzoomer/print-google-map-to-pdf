@@ -482,23 +482,24 @@ def save_combined_forms_and_maps(
     driver = gmp.get_chrome_driver(driver_path)
     driver.set_window_size(window_width, window_height)
     try:
-        # Group records by their delivery route
-        idx = 0
+        # Group records by their delivery route across the entire list.  This
+        # ensures that all records with the same route (even if non‑contiguous
+        # in the input) are processed together into a single PDF.  Preserve
+        # the order in which each route first appears.
+        from collections import OrderedDict
+
+        route_groups: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+        for rec in records:
+            key = rec.get("route", "") or ""
+            if key not in route_groups:
+                route_groups[key] = []
+            route_groups[key].append(rec)
         total_groups = 0
-        while idx < len(records):
-            current_route = records[idx].get("route") or None
-            # Accumulate consecutive records with the same route
-            group_records: List[Dict[str, Any]] = []
-            group_links: List[str] = []
-            group_labels: List[Optional[str]] = []
-            group_bags: List[Optional[str]] = []
-            while idx < len(records) and (records[idx].get("route") or None) == current_route:
-                rec = records[idx]
-                group_records.append(rec)
-                group_links.append(rec.get("map_url", ""))
-                group_labels.append(rec.get("route", ""))
-                group_bags.append(rec.get("bags", ""))
-                idx += 1
+        for route_key, group_records in route_groups.items():
+            # Build lists for map generation
+            group_links: List[str] = [r.get("map_url", "") for r in group_records]
+            group_labels: List[Optional[str]] = [r.get("route", "") for r in group_records]
+            group_bags: List[Optional[str]] = [r.get("bags", "") for r in group_records]
             # Generate map pages for this group
             try:
                 map_pages: List[bytes] = gmp.print_map_pages(
@@ -516,10 +517,9 @@ def save_combined_forms_and_maps(
                     bag_counts=group_bags,
                 )
             except Exception as e:
-                # Provide additional context for map printing errors
                 first_id = group_records[0].get("id") if group_records else "?"
                 print(
-                    f"Error generating map pages for route '{current_route}' starting at record ID {first_id}: {e}"
+                    f"Error generating map pages for route '{route_key}' starting at record ID {first_id}: {e}"
                 )
                 raise
             # Generate order form pages for this group
@@ -532,39 +532,48 @@ def save_combined_forms_and_maps(
                     order_pages.append(buf.getvalue())
                 except Exception as e:
                     print(
-                        f"Error generating order form for record ID {rec.get('id')} on route '{current_route}': {e}"
+                        f"Error generating order form for record ID {rec.get('id')} on route '{route_key}': {e}"
                     )
                     raise
-            # Merge pages: order form followed by map for each record
-            writer = PdfWriter()
-            num_records = len(group_records)
-            for i in range(num_records):
-                # Add corresponding map page first (landscape)
-                if i < len(map_pages):
-                    map_reader = PdfReader(BytesIO(map_pages[i]))
-                    for page in map_reader.pages:
-                        writer.add_page(page)
-                # Then add the order form page (portrait)
-                order_reader = PdfReader(BytesIO(order_pages[i]))
-                for page in order_reader.pages:
-                    writer.add_page(page)
-            # Construct a safe base name for the output file
-            if current_route:
-                base_name = re.sub(r"[^A-Za-z0-9]+", "_", current_route.strip())
+            # Determine a safe base name for the output file once per route
+            if route_key:
+                base_name = re.sub(r"[^A-Za-z0-9]+", "_", route_key.strip())
                 if not base_name:
                     base_name = "combined"
             else:
                 base_name = "combined"
             out_path = os.path.join(output_dir, f"{base_name}.pdf")
-            # Write out the combined PDF
+            # Prepare a PDF writer.  If the output file already exists, load
+            # its pages first so that new pages are appended at the end.
+            writer = PdfWriter()
+            if os.path.exists(out_path):
+                try:
+                    existing_reader = PdfReader(out_path)
+                    for page in existing_reader.pages:
+                        writer.add_page(page)
+                except Exception:
+                    # If the existing file is unreadable, skip merging it
+                    pass
+            # Merge new pages: map first, then order form
+            num_records = len(group_records)
+            for i in range(num_records):
+                # Map page
+                if i < len(map_pages):
+                    map_reader = PdfReader(BytesIO(map_pages[i]))
+                    for page in map_reader.pages:
+                        writer.add_page(page)
+                # Order form page
+                order_reader = PdfReader(BytesIO(order_pages[i]))
+                for page in order_reader.pages:
+                    writer.add_page(page)
+            # Write the combined PDF (existing pages plus new pages)
             with open(out_path, "wb") as f:
                 writer.write(f)
-            print(f"Wrote {2 * num_records} page(s) to '{out_path}'.")
+            print(f"Wrote {2 * num_records} new page(s) to '{out_path}'.")
             total_groups += 1
         if total_groups == 0:
             print("No PDF files were created; aborting.")
     finally:
-        # Always quit the driver to release resources
         driver.quit()
 
 
