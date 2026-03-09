@@ -13,7 +13,7 @@ fi
 
 INPUT="$1"
 OUTPUT="${2:-output/output_maps.pdf}"
-DRIVER_PATH="${3:-lib/chromedriver}"
+DRIVER_PATH="${3:-}"
 WAIT="${4:-5}"
 LIMIT="${5:-10}"
 PAPER_WIDTH="${6:-11}"
@@ -29,14 +29,20 @@ mkdir -p "$(dirname "$OUTPUT")"
 echo "Running generate_maps_pdf.py"
 echo "  input: $INPUT"
 echo "  output: $OUTPUT"
-echo "  driver: $DRIVER_PATH"
+[ -n "$DRIVER_PATH" ] && echo "  driver: $DRIVER_PATH" || echo "  driver: (auto - Selenium Manager)"
 #echo "  wait: $WAIT  limit: $LIMIT  paper: ${PAPER_WIDTH}x${PAPER_HEIGHT}"
 
-python3 src/generate_maps_pdf.py \
-  --input "$INPUT" \
-  --output "$OUTPUT" \
-  --driver-path "$DRIVER_PATH" \
-  #--wait "$WAIT" --limit "$LIMIT" --paper-width "$PAPER_WIDTH" --paper-height "$PAPER_HEIGHT"
-  --use-original
+if [ -n "$DRIVER_PATH" ]; then
+  python3 src/generate_maps_pdf.py \
+    --input "$INPUT" \
+    --output "$OUTPUT" \
+    --driver-path "$DRIVER_PATH" \
+    --use-original
+else
+  python3 src/generate_maps_pdf.py \
+    --input "$INPUT" \
+    --output "$OUTPUT" \
+    --use-original
+fi
 
 echo "Done. Output written to $OUTPUT"
