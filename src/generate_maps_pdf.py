@@ -49,6 +49,7 @@ import csv
 import os
 import re
 import sys
+import tempfile
 import time
 from io import BytesIO
 from typing import List, Optional, Tuple, Iterable
@@ -274,6 +275,10 @@ def get_chrome_driver(chromedriver_path: Optional[str]) -> webdriver.Chrome:
             "Selenium is not installed.  Install it with `pip install selenium`."
         )
     chrome_options = Options()
+    # Use a unique user-data-dir to avoid "already in use" when multiple
+    # Chrome processes or repeated runs share the default directory.
+    tmpdir = tempfile.mkdtemp(prefix="chrome_userdata_")
+    chrome_options.add_argument(f"--user-data-dir={tmpdir}")
     # Use the new headless mode for better compatibility
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
