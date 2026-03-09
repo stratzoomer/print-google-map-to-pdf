@@ -26,6 +26,16 @@ python3 generate_maps_pdf.py \
   --driver-path lib/chromedriver \
   --wait 5 --limit 10 --paper-width 11 --paper-height 8.5
 ```
+- Run `python3 generate_maps_pdf.py --help` for full CLI options.
+- The specific command I am using for testing with the 2-line CSV is:
+
+```bash
+python3 generate_maps_pdf.py \
+  --input input/map-print-test-Spring-2025-2-lines.csv \
+  --output output/output_maps.pdf \
+  --driver-path lib/chromedriver \
+  --use-original
+```
 
 Important code patterns and conventions (for AI agents)
 - CSV reading: `read_links_from_csv(path, max_links)` expects one URL per
