@@ -1,62 +1,90 @@
 # Print Google Maps to PDF
 
-Small Python utility that reads a CSV of Google Maps links (one URL per
-row), opens each location in headless Chrome, captures a PDF snapshot
-using Chrome DevTools `printToPDF`, and merges the pages into a single
-landscape PDF.
+Python utilities that read a CSV of order data with Google Maps links,
+generate order forms (receipts), and capture map PDFs using headless
+Chrome. For delivery workflows, the preferred script produces combined
+PDFs with an order form followed by the map for each address.
 
 Key files
-- `src/generate_maps_pdf.py` — primary, documented implementation used by
-  the provided wrapper script.
-- `generate_maps_pdf.py` — top-level variant (same core logic). Either may
-  be used; the wrapper calls the `src/` copy by default.
-- `scripts/run_generate_maps_pdf.sh` — convenience wrapper that accepts a
-  single positional `input` CSV and sensible defaults for output and
-  driver path.
-- `input/` — sample CSVs to try locally.
+- `src/generate_order_forms.py` — **recommended**: generates order form +
+  map PDFs combined, grouped by delivery route. One PDF per route with
+  alternating order form (portrait) and map (landscape) pages per record.
+- `src/generate_maps_pdf.py` — maps only.
+- `run_generate_maps_pdf.sh` — convenience wrapper for maps-only output.
+- `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
+- `input/` — sample CSVs. `new-data.csv` and `wait-list-4-records.csv`
+  share the same format and work with both scripts.
 
 Quick start
-1. Install Python 3.7+.
-2. Install required packages into the Python interpreter you will use:
+
+1. Install Python 3.7+ and ensure Chrome/Chromium is installed.
+2. Create and activate a virtual environment (recommended):
 
 ```bash
-python3 -m pip install --upgrade pip
-python3 -m pip install selenium PyPDF2
+python3 -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
 ```
 
-3. Ensure Chrome/Chromium is installed and download a matching
-   ChromeDriver binary. Put it on `PATH` or pass its path to the script.
-
-Run the wrapper (recommended):
+3. Install dependencies:
 
 ```bash
-./scripts/run_generate_maps_pdf.sh input/map-print-test-Spring-2025-2-lines.csv
+pip install -r requirements.txt
 ```
 
-Or run the script directly:
+Or: `pip install selenium PyPDF2 Pillow`
+
+4. **Recommended — order form + map combined** (one PDF per delivery route):
+
+```bash
+python3 src/generate_order_forms.py \
+  --input input/wait-list-4-records.csv \
+  --output output/combined \
+  --use-original
+```
+
+Creates files like `output/combined/Fairfax_Station_12.pdf`, each containing
+order form pages and map pages for every record on that route.
+
+5. Maps only (if you only need maps):
+
+```bash
+./run_generate_maps_pdf.sh input/input-2-lines-with-delivery-route.csv
+```
+
+Or run the maps script directly:
 
 ```bash
 python3 src/generate_maps_pdf.py \
-  --input input/map-print-test-Spring-2025-2-lines.csv \
+  --input input/input-2-lines-with-delivery-route.csv \
   --output output/output_maps.pdf \
-  --driver-path lib/chromedriver \
-  --wait 5 --limit 10 --paper-width 11 --paper-height 8.5
+  --use-original
 ```
 
+By default, Selenium Manager auto-downloads a matching ChromeDriver; no
+manual driver install is needed. To use a specific driver for maps:
+`./run_generate_maps_pdf.sh input.csv output.pdf lib/chromedriver`.
+
+generate_order_forms.py — CSV format and options
+- Expects columns: `Map Link`, `Delivery Route`, `Number of Bags`, `Comment`,
+  `Support Troop Amount`, `LastName`, `FirstName`, `Town`, `Street Address`,
+  `EmailAddress`, `Delivery Instructions`. Order # is parsed from `Comment`
+  when it matches "Order 12345".
+- `new-data.csv` and `wait-list-4-records.csv` use the same format; both work.
+- Options: `--use-original` (print original Google Maps link), `--no-header`,
+  `--no-marker`, `--driver-path`, `--wait`, `--paper-width`, `--paper-height`.
+
 Notes & troubleshooting
-- If you see "No module named 'PyPDF2'": the interpreter used to run the
-  script doesn't have PyPDF2 installed. Fix by installing into that same
-  interpreter: `python3 -m pip install PyPDF2 selenium` (use the same
-  `python3` binary you will run the script with).
-- ChromeDriver version mismatch is a common failure mode. Download a
-  matching driver: https://chromedriver.chromium.org and make it
-  executable: `chmod +x lib/chromedriver`.
-- The script supports two display modes: coordinate-based (default) and
-  original link mode (`--use-original`). Coordinate mode builds URLs like
-
-  `https://maps.google.com/maps?q={lat},{lon}&ll={lat},{lon}&z={zoom}`
-
-  to remove the place card and still show a marker.
+- If you see "No module named 'PyPDF2'" or "No module named 'PIL'": activate
+  your virtual environment (`source .venv/bin/activate`) and run
+  `pip install -r requirements.txt`.
+- ChromeDriver version mismatch: omit `--driver-path` to let Selenium
+  Manager fetch the correct driver. If using a manual driver, download a
+  version matching your Chrome from https://chromedriver.chromium.org and
+  make it executable: `chmod +x lib/chromedriver`.
+- Map display modes: coordinate-based (default) or original link
+  (`--use-original`). With `--use-original`, the script prints the full
+  Google Maps URL. Output is one PDF per delivery route (e.g.
+  `output/combined/Fairfax_12B.pdf`).
 
 Where to look when changing behavior
 - `print_map_pages(...)` in `src/generate_maps_pdf.py` constructs the
@@ -65,5 +93,3 @@ Where to look when changing behavior
 - Pure helpers `extract_coordinates`, `extract_zoom`, `extract_address`
   live in the same module and are good targets for unit tests.
 
-If you want, I can add a `requirements.txt`, a tiny unit test for the
-parsing helpers, or make the wrapper auto-detect a virtualenv Python.
