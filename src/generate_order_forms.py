@@ -72,39 +72,48 @@ def parse_order_records(path: str) -> List[Dict[str, Any]]:
         record.  The order of the records is preserved.
     """
     records: List[Dict[str, Any]] = []
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for idx, row in enumerate(reader, start=1):
-            record: Dict[str, Any] = {}
-            # Order number: extract digits following "Order "
-            comment = row.get("Comment", "") or ""
-            order_no = ""
-            match = re.search(r"Order\s+(\d+)", comment)
-            if match:
-                order_no = match.group(1)
-            record["order_no"] = order_no
-            # Amount supporting troop
-            record["amount_support"] = row.get("Support Troop Amount", "").strip()
-            # Delivery customer: LastName, FirstName
-            last = row.get("LastName", "").strip()
-            first = row.get("FirstName", "").strip()
-            customer = ", ".join(filter(None, [last, first])) if last or first else ""
-            record["customer"] = customer
-            # Delivery city
-            record["city"] = row.get("Town", "").strip()
-            # Delivery address
-            record["address"] = row.get("Street Address", "").strip()
-            # Buyer email
-            record["email"] = row.get("EmailAddress", "").strip()
-            # Bags
-            record["bags"] = row.get("Number of Bags", "").strip()
-            # Route
-            record["route"] = row.get("Delivery Route", "").strip()
-            # ID (sequential)
-            record["id"] = idx
-            # Special instructions
-            record["instructions"] = row.get("Delivery Instructions", "").strip()
-            records.append(record)
+    # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports.
+    for encoding in ("utf-8", "cp1252", "latin-1"):
+        records = []
+        try:
+            with open(path, newline="", encoding=encoding) as f:
+                reader = csv.DictReader(f)
+                for idx, row in enumerate(reader, start=1):
+                    record: Dict[str, Any] = {}
+                    # Order number: extract digits following "Order "
+                    comment = row.get("Comment", "") or ""
+                    order_no = ""
+                    match = re.search(r"Order\s+(\d+)", comment)
+                    if match:
+                        order_no = match.group(1)
+                    record["order_no"] = order_no
+                    # Amount supporting troop
+                    record["amount_support"] = row.get("Support Troop Amount", "").strip()
+                    # Delivery customer: LastName, FirstName
+                    last = row.get("LastName", "").strip()
+                    first = row.get("FirstName", "").strip()
+                    customer = ", ".join(filter(None, [last, first])) if last or first else ""
+                    record["customer"] = customer
+                    # Delivery city
+                    record["city"] = row.get("Town", "").strip()
+                    # Delivery address
+                    record["address"] = row.get("Street Address", "").strip()
+                    # Buyer email
+                    record["email"] = row.get("EmailAddress", "").strip()
+                    # Bags
+                    record["bags"] = row.get("Number of Bags", "").strip()
+                    # Route
+                    record["route"] = row.get("Delivery Route", "").strip()
+                    # ID (sequential)
+                    record["id"] = idx
+                    # Special instructions
+                    record["instructions"] = row.get("Delivery Instructions", "").strip()
+                    records.append(record)
+            break
+        except UnicodeDecodeError:
+            if encoding == "latin-1":
+                raise
+            continue
     return records
 
 

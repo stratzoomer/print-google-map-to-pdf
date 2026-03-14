@@ -190,9 +190,17 @@ def read_records_from_csv(
     records: List[Tuple[str, Optional[str], Optional[str]]] = []
     # Read all rows first so that we can inspect the header row.  Using a
     # dedicated list avoids complications with the csv reader state.
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        rows = list(reader)
+    # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports (e.g. 0x92 = smart quote).
+    for encoding in ("utf-8", "cp1252", "latin-1"):
+        try:
+            with open(path, newline="", encoding=encoding) as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            break
+        except UnicodeDecodeError:
+            if encoding == "latin-1":
+                raise
+            continue
     if not rows:
         return records
     # Determine whether the first row is a header.  We treat it as a header
