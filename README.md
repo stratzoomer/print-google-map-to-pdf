@@ -11,6 +11,7 @@ Key files
   alternating order form (portrait) and map (landscape) pages per record.
 - `src/generate_maps_pdf.py` — maps only.
 - `run_generate_maps_pdf.sh` — convenience wrapper for maps-only output.
+  Creates and uses a `.venv`, installs dependencies automatically.
 - `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
 - `input/` — sample CSVs. `new-data.csv` and `wait-list-4-records.csv`
   share the same format and work with both scripts.
@@ -18,24 +19,14 @@ Key files
 Quick start
 
 1. Install Python 3.7+ and ensure Chrome/Chromium is installed.
-2. Create and activate a virtual environment (recommended):
+
+2. **Recommended — order form + map combined** (one PDF per delivery route):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # On Windows: .venv\Scripts\activate
-```
-
-3. Install dependencies:
-
-```bash
 pip install -r requirements.txt
-```
 
-Or: `pip install selenium PyPDF2 Pillow`
-
-4. **Recommended — order form + map combined** (one PDF per delivery route):
-
-```bash
 python3 src/generate_order_forms.py \
   --input input/wait-list-4-records.csv \
   --output output/combined \
@@ -45,13 +36,14 @@ python3 src/generate_order_forms.py \
 Creates files like `output/combined/Fairfax_Station_12.pdf`, each containing
 order form pages and map pages for every record on that route.
 
-5. Maps only (if you only need maps):
+3. **Maps only** — no manual setup: the wrapper creates a venv and installs
+   dependencies automatically:
 
 ```bash
 ./run_generate_maps_pdf.sh input/input-2-lines-with-delivery-route.csv
 ```
 
-Or run the maps script directly:
+Or run the maps script directly (after activating the venv from step 2):
 
 ```bash
 python3 src/generate_maps_pdf.py \
@@ -74,9 +66,10 @@ generate_order_forms.py — CSV format and options
   `--no-marker`, `--driver-path`, `--wait`, `--paper-width`, `--paper-height`.
 
 Notes & troubleshooting
-- If you see "No module named 'PyPDF2'" or "No module named 'PIL'": activate
-  your virtual environment (`source .venv/bin/activate`) and run
-  `pip install -r requirements.txt`.
+- If you see "No module named 'PyPDF2'" or "No module named 'PIL'" when running
+  `generate_order_forms.py` directly: activate the venv
+  (`source .venv/bin/activate`) and run `pip install -r requirements.txt`.
+  The maps wrapper (`run_generate_maps_pdf.sh`) handles this automatically.
 - ChromeDriver version mismatch: omit `--driver-path` to let Selenium
   Manager fetch the correct driver. If using a manual driver, download a
   version matching your Chrome from https://chromedriver.chromium.org and

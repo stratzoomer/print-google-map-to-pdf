@@ -1,18 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple wrapper to run generate_maps_pdf.py with sensible defaults.
-# Usage: ./scripts/run_generate_maps_pdf.sh <input-csv> [output-pdf] [driver-path]
+# Wrapper to run generate_maps_pdf.py with sensible defaults.
+# Creates/uses .venv and installs dependencies automatically.
+# Usage: ./run_generate_maps_pdf.sh <input-csv> [output-pdf] [driver-path]
 # Example:
-#   ./scripts/run_generate_maps_pdf.sh input/map-print-test-Spring-2025-2-lines.csv
+#   ./run_generate_maps_pdf.sh input/input-2-lines-with-delivery-route.csv
 
 if [ "$#" -lt 1 ]; then
   echo "Usage: $0 <input-csv> [output-pdf] [driver-path] [wait] [limit] [paper-width] [paper-height]"
   exit 2
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Create and activate venv; install dependencies
+if [ ! -d .venv ]; then
+  echo "Creating virtual environment..."
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+
+if [ ! -f requirements.txt ]; then
+  echo "Error: requirements.txt not found." >&2
+  exit 4
+fi
+echo "Ensuring dependencies are installed..."
+pip install -q -r requirements.txt
+
 INPUT="$1"
-OUTPUT="${2:-output/output_maps.pdf}"
+OUTPUT="${2:-output}"
 DRIVER_PATH="${3:-}"
 WAIT="${4:-5}"
 LIMIT="${5:-10}"
