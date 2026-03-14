@@ -1,42 +1,37 @@
 # Print Google Maps to PDF
 
-Python utilities that read a CSV of order data with Google Maps links,
-generate order forms (receipts), and capture map PDFs using headless
-Chrome. For delivery workflows, the preferred script produces combined
-PDFs with an order form followed by the map for each address.
+Python utilities that read a CSV of order data with Google Maps links:
+one script generates order form PDFs (receipts); another captures map
+PDFs using headless Chrome.
 
 Key files
-- `src/generate_order_forms.py` — **recommended**: generates order form +
-  map PDFs combined, grouped by delivery route. One PDF per route with
-  alternating order form (portrait) and map (landscape) pages per record.
-- `src/generate_maps_pdf.py` — maps only.
+- `src/generate_order_forms.py` — generates order form PDFs grouped by
+  Delivery Route. One combined PDF per route (e.g. `Fairfax_12B.pdf`).
+  Requires Pillow and PyPDF2.
+- `src/generate_maps_pdf.py` — generates map PDFs from Google Maps links.
 - `run_generate_maps_pdf.sh` — convenience wrapper for maps-only output.
   Creates and uses a `.venv`, installs dependencies automatically.
 - `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
-- `input/` — sample CSVs. `new-data.csv` and `wait-list-4-records.csv`
-  share the same format and work with both scripts.
+- `input/` — sample CSVs.
 
 Quick start
 
-1. Install Python 3.7+ and ensure Chrome/Chromium is installed.
+1. Install Python 3.7+.
 
-2. **Recommended — order form + map combined** (one PDF per delivery route):
+2. **Order forms only** (no Chrome needed):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install Pillow
 
-python3 src/generate_order_forms.py \
-  --input input/wait-list-4-records.csv \
-  --output output/combined \
-  --use-original
+python3 src/generate_order_forms.py --input input.csv --output output/forms
 ```
 
-Creates files like `output/combined/Fairfax_Station_12.pdf`, each containing
-order form pages and map pages for every record on that route.
+Creates one PDF per delivery route (e.g. `Fairfax_12B.pdf`), each
+containing all order forms for that route.
 
-3. **Maps only** — no manual setup: the wrapper creates a venv and installs
+3. **Maps** — requires Chrome/Chromium. The wrapper creates a venv and installs
    dependencies automatically:
 
 ```bash
@@ -56,20 +51,15 @@ By default, Selenium Manager auto-downloads a matching ChromeDriver; no
 manual driver install is needed. To use a specific driver for maps:
 `./run_generate_maps_pdf.sh input.csv output.pdf lib/chromedriver`.
 
-generate_order_forms.py — CSV format and options
-- Expects columns: `Map Link`, `Delivery Route`, `Number of Bags`, `Comment`,
-  `Support Troop Amount`, `LastName`, `FirstName`, `Town`, `Street Address`,
-  `EmailAddress`, `Delivery Instructions`. Order # is parsed from `Comment`
-  when it matches "Order 12345".
-- `new-data.csv` and `wait-list-4-records.csv` use the same format; both work.
-- Options: `--use-original` (print original Google Maps link), `--no-header`,
-  `--no-marker`, `--driver-path`, `--wait`, `--paper-width`, `--paper-height`.
+generate_order_forms.py — CSV format
+- Expects columns: `Comment`, `Support Troop Amount`, `LastName`, `FirstName`,
+  `Town`, `Street Address`, `EmailAddress`, `Number of Bags`, `Delivery Route`,
+  `Delivery Instructions`. Order # is parsed from `Comment` when it matches
+  "Order 12345".
 
 Notes & troubleshooting
-- If you see "No module named 'PyPDF2'" or "No module named 'PIL'" when running
-  `generate_order_forms.py` directly: activate the venv
-  (`source .venv/bin/activate`) and run `pip install -r requirements.txt`.
-  The maps wrapper (`run_generate_maps_pdf.sh`) handles this automatically.
+- `generate_order_forms.py` requires Pillow and PyPDF2: `pip install -r requirements.txt`
+  or `pip install Pillow PyPDF2`.
 - ChromeDriver version mismatch: omit `--driver-path` to let Selenium
   Manager fetch the correct driver. If using a manual driver, download a
   version matching your Chrome from https://chromedriver.chromium.org and
