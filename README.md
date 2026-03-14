@@ -9,8 +9,9 @@ Key files
   Delivery Route. One combined PDF per route (e.g. `Fairfax_12B.pdf`).
   Requires Pillow and PyPDF2.
 - `src/generate_maps_pdf.py` — generates map PDFs from Google Maps links.
-- `run_generate_maps_pdf.sh` — convenience wrapper for maps-only output.
-  Creates and uses a `.venv`, installs dependencies automatically.
+- `run_generate_maps_pdf.sh` — convenience wrapper. Runs maps and/or order
+  forms via `--maps`, `--orders`, or `--all` (default). Creates `.venv`,
+  installs dependencies automatically.
 - `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
 - `input/` — sample CSVs.
 
@@ -31,25 +32,17 @@ python3 src/generate_order_forms.py --input input.csv --output output/forms
 Creates one PDF per delivery route (e.g. `Fairfax_12B.pdf`), each
 containing all order forms for that route.
 
-3. **Maps** — requires Chrome/Chromium. The wrapper creates a venv and installs
-   dependencies automatically:
+3. **Wrapper script** — runs both, or either, with venv and deps handled:
 
 ```bash
-./run_generate_maps_pdf.sh input/input-2-lines-with-delivery-route.csv
+./run_generate_maps_pdf.sh input/data.csv              # both (maps + orders)
+./run_generate_maps_pdf.sh --maps input/data.csv       # maps only
+./run_generate_maps_pdf.sh --orders input/data.csv     # order forms only
 ```
 
-Or run the maps script directly (after activating the venv from step 2):
-
-```bash
-python3 src/generate_maps_pdf.py \
-  --input input/input-2-lines-with-delivery-route.csv \
-  --output output/output_maps.pdf \
-  --use-original
-```
-
-By default, Selenium Manager auto-downloads a matching ChromeDriver; no
-manual driver install is needed. To use a specific driver for maps:
-`./run_generate_maps_pdf.sh input.csv output.pdf lib/chromedriver`.
+Maps require Chrome/Chromium. Order forms do not. With `--all` (default),
+output goes to `output/maps/` and `output/orders/`. Pass a second arg for a
+custom output dir. Use a third arg for a custom ChromeDriver path.
 
 generate_order_forms.py — CSV format
 - Expects columns: `Comment`, `Support Troop Amount`, `LastName`, `FirstName`,
