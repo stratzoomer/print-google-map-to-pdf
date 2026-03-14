@@ -203,22 +203,29 @@ def read_records_from_csv(
             continue
     if not rows:
         return records
-    # Determine whether the first row is a header.  We treat it as a header
-    # when it contains known field names for the URL and label.
-    header = [cell.strip() for cell in rows[0]]
-    # Normalise header names for comparison
-    header_lower = [h.lower() for h in header]
     # Known field names for map link, label and bag count
     link_field_names = {"map link", "maplink", "map_link"}
     label_field_names = {"delivery route", "deliveryroute", "delivery_route", "label"}
     bags_field_names = {"number of bags", "numberofbags", "number_of_bags", "bags"}
+    # Find the header row: scan the first few rows in case there is a title
+    # row (e.g. "Spring 2026") before the column names.
+    max_header_search = min(10, len(rows))
+    header_row_idx = 0
+    for i in range(max_header_search):
+        candidate = [cell.strip() for cell in rows[i]]
+        candidate_lower = [c.lower() for c in candidate]
+        if any(name in candidate_lower for name in link_field_names):
+            header_row_idx = i
+            break
+    header = [cell.strip() for cell in rows[header_row_idx]]
+    header_lower = [h.lower() for h in header]
     has_header = any(name in header_lower for name in link_field_names)
     link_index: Optional[int] = None
     label_index: Optional[int] = None
     bags_index: Optional[int] = None
     start_idx = 0
     if has_header:
-        start_idx = 1
+        start_idx = header_row_idx + 1
         # Identify the indices of the link and label fields (case insensitive)
         for i, h in enumerate(header_lower):
             if h in link_field_names and link_index is None:
