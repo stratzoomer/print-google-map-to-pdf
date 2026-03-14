@@ -478,9 +478,13 @@ def save_combined_forms_and_maps(
     os.makedirs(output_dir, exist_ok=True)
     # Load fonts once for all order forms
     fonts = load_fonts()
-    # Initialise Chrome driver for printing maps
+    # Initialise Chrome driver for printing maps. Set window size to match
+    # paper aspect ratio so the viewport fills the page and avoids empty space.
+    paper_ratio = paper_width / paper_height
+    win_height = window_height
+    win_width = int(win_height * paper_ratio)
     driver = gmp.get_chrome_driver(driver_path)
-    driver.set_window_size(window_width, window_height)
+    driver.set_window_size(win_width, win_height)
     try:
         # Group records by their delivery route across the entire list.  This
         # ensures that all records with the same route (even if non‑contiguous

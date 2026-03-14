@@ -648,9 +648,13 @@ def main() -> None:
         os.makedirs(output_dir, exist_ok=True)
 
     # Initialise the Chrome driver once and reuse it across groups to
-    # minimise startup overhead.
+    # minimise startup overhead. Set window size to match paper aspect ratio
+    # so the viewport fills the page and avoids empty space at top/bottom.
+    paper_ratio = args.paper_width / args.paper_height
+    win_height = args.window_height
+    win_width = int(win_height * paper_ratio)
     driver = get_chrome_driver(args.driver_path)
-    driver.set_window_size(args.window_width, args.window_height)
+    driver.set_window_size(win_width, win_height)
     try:
         # Group records by their label.  Because the input is sorted on the
         # second field, we can accumulate consecutive rows with the same

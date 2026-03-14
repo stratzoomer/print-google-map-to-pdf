@@ -78,6 +78,9 @@ Notes & troubleshooting
   (`--use-original`). With `--use-original`, the script prints the full
   Google Maps URL. Output is one PDF per delivery route (e.g.
   `output/combined/Fairfax_12B.pdf`).
+- Empty space at bottom of maps: the script sets the browser window to match
+  the paper aspect ratio (11×8.5 by default) to minimize this. If you still
+  see excess space, try `--scale 1.05` (or up to 1.1) to zoom the content.
 
 Where to look when changing behavior
 - `print_map_pages(...)` in `src/generate_maps_pdf.py` constructs the
