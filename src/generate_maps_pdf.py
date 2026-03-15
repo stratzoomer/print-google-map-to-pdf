@@ -53,9 +53,10 @@ import tempfile
 import time
 from io import BytesIO
 from typing import List, Optional, Tuple, Iterable
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import html
 
-from PyPDF2 import PdfReader, PdfWriter
+from PyPDF2 import PdfReader, PdfWriter, PdfMerger
 
 # Selenium imports are deferred so that the script's help can be printed
 # without requiring the package to be installed.
@@ -63,12 +64,14 @@ try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.support.ui import WebDriverWait
 except ImportError as exc:  # pragma: no cover
     # When selenium isn't available we set these to None; this allows the
     # script to emit a helpful error at runtime rather than failing on import.
     webdriver = None  # type: ignore
     Options = None  # type: ignore
     Service = None  # type: ignore
+    WebDriverWait = None  # type: ignore
 
 
 def extract_address(link: str) -> Optional[str]:
@@ -155,6 +158,54 @@ def extract_zoom(link: str, default: int = 16) -> int:
         except ValueError:
             return default
     return default
+
+
+def _strip_auth_params(url: str) -> str:
+    """Remove auth/session query params that can cause a blank map in headless.
+
+    Links copied while signed into Google (e.g. authuser=1, g_ep=...) can render
+    blank or redirect when opened in an unauthenticated browser.
+    """
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    for key in ("authuser", "g_ep", "entry"):
+        params.pop(key, None)
+    new_query = urlencode(params, doseq=True)
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
+    )
+
+
+def _is_map_ready(driver: "webdriver.Chrome") -> bool:
+    """Return True if the page has a large map canvas (map has rendered)."""
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                var canvases = document.querySelectorAll('canvas');
+                for (var i = 0; i < canvases.length; i++) {
+                    if (canvases[i].width > 200 && canvases[i].height > 200)
+                        return true;
+                }
+                return false;
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _wait_for_map_ready(driver: "webdriver.Chrome", timeout: float = 20.0) -> None:
+    """Wait until the map canvas is rendered so the PDF capture is not blank."""
+    if WebDriverWait is None:
+        return
+
+    try:
+        WebDriverWait(driver, timeout=timeout).until(_is_map_ready)
+    except Exception:
+        pass  # Proceed anyway after timeout; fixed sleep may still help
 
 
 def read_records_from_csv(
@@ -401,9 +452,7 @@ def print_map_pages(
     for idx, link in enumerate(links, start=1):
         # Determine which URL to load.  If use_coordinates is enabled and the
         # link yields valid coordinates, build a bare map URL to eliminate
-        # the place card.  Otherwise fall back to the original link.  We do
-        # not include the `q` parameter by default because it reintroduces
-        # the place summary card; instead we inject our own marker later.
+        # the place card.  Otherwise fall back to the original link.
         load_url = link
         coords: Optional[Tuple[float, float]] = None
         zoom: int = 16
@@ -413,15 +462,12 @@ def print_map_pages(
                 lat, lon = coords
                 zoom = extract_zoom(link)
                 load_url = f"https://maps.google.com/maps?ll={lat},{lon}&z={zoom}"
+        load_url = _strip_auth_params(load_url)
         print(f"Loading map {idx}/{total}: {load_url}")
         driver.get(load_url)
-        # allow some time for the page and map tiles to load
+        _wait_for_map_ready(driver, timeout=20.0)
         time.sleep(page_wait)
         # Inject a simple marker at the map centre when using coordinate view.
-        # This avoids displaying the default place card and photo.  The marker
-        # consists of a small red dot with a white border, positioned at the
-        # centre of the viewport.  It is added only if a coordinate was
-        # successfully extracted and inject_marker is true.
         if inject_marker and use_coordinates and coords is not None:
             try:
                 script = """
@@ -445,11 +491,8 @@ def print_map_pages(
                 """
                 driver.execute_script(script)
             except Exception:
-                # If injection fails, silently ignore and proceed.
                 pass
-        # Build print options.  Do not rotate the content; instead set the
-        # paper size so that width > height for landscape.  Chrome will then
-        # preserve the map's orientation without introducing extra white space.
+        # Build print options.
         print_opts = {
             "landscape": False,
             "marginTop": 0,
@@ -458,23 +501,16 @@ def print_map_pages(
             "marginRight": 0,
             "printBackground": True,
         }
-        # Header/footer handling
         if include_header:
-            # Extract the human‑readable address from the URL (if present).
             address = extract_address(link)
-            # Obtain the corresponding label and bag count for this row, if provided.
             label: Optional[str] = None
             bag: Optional[str] = None
             if labels is not None and idx - 1 < len(labels):
                 label = labels[idx - 1]
             if bag_counts is not None and idx - 1 < len(bag_counts):
                 bag = bag_counts[idx - 1]
-            # Only build a header if at least one of address, label or bag is not None.
             if address or label or bag:
                 safe_addr = html.escape(address) if address else ""
-                # Build the right-hand text.  Each component is prefixed with a
-                # descriptive label.  Use non-breaking spaces to separate the
-                # components so they do not collapse during rendering.
                 right_parts: List[str] = []
                 if label:
                     safe_label = html.escape(label)
@@ -493,11 +529,9 @@ def print_map_pages(
                 print_opts["displayHeaderFooter"] = True
                 print_opts["headerTemplate"] = header_html
                 print_opts["footerTemplate"] = ""
-        # Apply custom paper size if provided.  Width/height are in inches.
         if paper_width is not None and paper_height is not None:
             print_opts["paperWidth"] = paper_width
             print_opts["paperHeight"] = paper_height
-        # Apply scale if provided (allowed range is 0.1–2.0)
         if scale is not None:
             print_opts["scale"] = scale
         result = driver.execute_cdp_cmd("Page.printToPDF", print_opts)  # type: ignore
@@ -509,6 +543,9 @@ def print_map_pages(
 def merge_pdf_pages(pages: List[bytes], output_path: str) -> None:
     """Merge multiple PDF pages into a single PDF file.
 
+    Uses PdfMerger with temporary files to ensure each source PDF's
+    indirect objects are fully isolated and don't cross-contaminate.
+
     Parameters
     ----------
     pages : list[bytes]
@@ -517,13 +554,26 @@ def merge_pdf_pages(pages: List[bytes], output_path: str) -> None:
     output_path : str
         Where to write the merged PDF.
     """
-    writer = PdfWriter()
-    for page_data in pages:
-        reader = PdfReader(BytesIO(page_data))
-        for page in reader.pages:
-            writer.add_page(page)
-    with open(output_path, "wb") as f:
-        writer.write(f)
+    tmp_files: List[str] = []
+    try:
+        for page_data in pages:
+            tmp = tempfile.NamedTemporaryFile(
+                delete=False, suffix=".pdf", prefix="map_page_"
+            )
+            tmp.write(page_data)
+            tmp.close()
+            tmp_files.append(tmp.name)
+        merger = PdfMerger()
+        for tmp_path in tmp_files:
+            merger.append(tmp_path)
+        merger.write(output_path)
+        merger.close()
+    finally:
+        for tmp_path in tmp_files:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def main() -> None:
@@ -662,12 +712,13 @@ def main() -> None:
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    # Initialise the Chrome driver once and reuse it across groups to
-    # minimise startup overhead. Set window size to match paper aspect ratio
-    # so the viewport fills the page and avoids empty space at top/bottom.
+    # Compute window dimensions to match the paper aspect ratio so
+    # the viewport fills the page without empty space at top/bottom.
     paper_ratio = args.paper_width / args.paper_height
     win_height = args.window_height
     win_width = int(win_height * paper_ratio)
+
+    # Create a single shared Chrome driver for all pages.
     driver = get_chrome_driver(args.driver_path)
     driver.set_window_size(win_width, win_height)
     try:
@@ -681,13 +732,11 @@ def main() -> None:
             group_links: List[str] = []
             group_labels: List[Optional[str]] = []
             group_bags: List[Optional[str]] = []
-            # Collect all consecutive records sharing the same label
             while idx < len(records) and records[idx][1] == current_label:
                 group_links.append(records[idx][0])
                 group_labels.append(records[idx][1])
                 group_bags.append(records[idx][2])
                 idx += 1
-            # Generate PDF pages for this group
             pages = print_map_pages(
                 group_links,
                 driver,
@@ -703,9 +752,6 @@ def main() -> None:
                 bag_counts=group_bags,
             )
             if pages:
-                # Sanitize the label to construct a safe filename.  Non‑alphanumeric
-                # characters are replaced with underscores.  If the label is
-                # empty or None, use a generic name "maps".
                 if current_label:
                     base_name = re.sub(r"[^A-Za-z0-9]+", "_", current_label.strip())
                     if not base_name:
@@ -720,7 +766,6 @@ def main() -> None:
             print("No PDF pages were created; aborting.")
             sys.exit(1)
     finally:
-        # Always quit the driver to release resources
         driver.quit()
 
 
