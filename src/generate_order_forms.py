@@ -3,7 +3,9 @@ generate_order_forms.py
 =======================
 
 This script generates order form PDFs from a CSV input file, grouped by
-``Delivery Route``.  Each delivery route produces one combined PDF
+``Delivery Route``.  Only rows with a positive ``Number of Bags`` are
+treated as orders, so the full season export can be used directly.
+Each delivery route produces one combined PDF
 containing all order forms for that route, named after the route (e.g.
 ``Fairfax_12B.pdf``).  It reads values from named columns such as
 ``Comment``, ``Support Troop Amount``, ``LastName``, ``FirstName``,
@@ -24,7 +26,7 @@ Fields and their mapping
 * **Buyer's Email** – the ``EmailAddress`` column.
 * **Bags** – the ``Number of Bags`` column.
 * **Route** – the ``Delivery Route`` column.
-* **ID** – a sequential identifier based on the record's position in the input.
+* **ID** – a sequential identifier based on the order's position in the input.
 * **Special Instructions** – the ``Delivery Instructions`` column, if present.
 
 Usage
@@ -57,6 +59,19 @@ PAGE_WIDTH = 612
 PAGE_HEIGHT = 792
 
 
+def is_order_row(row: Dict[str, str]) -> bool:
+    """Return True if a CSV row is an actual order.
+
+    The season export is the full customer list, so only rows with a
+    positive ``Number of Bags`` and a name or address are orders.  This
+    also skips the summary rows (Totals, Pallets, ...) at the bottom.
+    """
+    bags = (row.get("Number of Bags") or "").strip()
+    if not re.fullmatch(r"\d+", bags) or int(bags) == 0:
+        return False
+    return bool((row.get("LastName") or "").strip() or (row.get("Street Address") or "").strip())
+
+
 def parse_order_records(path: str) -> List[Dict[str, Any]]:
     """Parse relevant fields from the CSV input file.
 
@@ -71,49 +86,69 @@ def parse_order_records(path: str) -> List[Dict[str, Any]]:
         A list of dictionaries containing the extracted fields for each
         record.  The order of the records is preserved.
     """
-    records: List[Dict[str, Any]] = []
     # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports.
+    rows: List[List[str]] = []
     for encoding in ("utf-8", "cp1252", "latin-1"):
-        records = []
         try:
             with open(path, newline="", encoding=encoding) as f:
-                reader = csv.DictReader(f)
-                for idx, row in enumerate(reader, start=1):
-                    record: Dict[str, Any] = {}
-                    # Order number: extract digits following "Order "
-                    comment = row.get("Comment", "") or ""
-                    order_no = ""
-                    match = re.search(r"Order\s+(\d+)", comment)
-                    if match:
-                        order_no = match.group(1)
-                    record["order_no"] = order_no
-                    # Amount supporting troop
-                    record["amount_support"] = row.get("Support Troop Amount", "").strip()
-                    # Delivery customer: LastName, FirstName
-                    last = row.get("LastName", "").strip()
-                    first = row.get("FirstName", "").strip()
-                    customer = ", ".join(filter(None, [last, first])) if last or first else ""
-                    record["customer"] = customer
-                    # Delivery city
-                    record["city"] = row.get("Town", "").strip()
-                    # Delivery address
-                    record["address"] = row.get("Street Address", "").strip()
-                    # Buyer email
-                    record["email"] = row.get("EmailAddress", "").strip()
-                    # Bags
-                    record["bags"] = row.get("Number of Bags", "").strip()
-                    # Route
-                    record["route"] = row.get("Delivery Route", "").strip()
-                    # ID (sequential)
-                    record["id"] = idx
-                    # Special instructions
-                    record["instructions"] = row.get("Delivery Instructions", "").strip()
-                    records.append(record)
+                rows = list(csv.reader(f))
             break
         except UnicodeDecodeError:
             if encoding == "latin-1":
                 raise
             continue
+    if not rows:
+        return []
+    # Find the header row: the Google Sheets export may have a title row
+    # (e.g. "Fall 2026") before the column names.
+    header_row_idx = 0
+    for i, candidate in enumerate(rows[:10]):
+        if "LastName" in [c.strip() for c in candidate]:
+            header_row_idx = i
+            break
+    header = [c.strip() for c in rows[header_row_idx]]
+
+    records: List[Dict[str, Any]] = []
+    for values in rows[header_row_idx + 1:]:
+        row = dict(zip(header, values))
+        if not is_order_row(row):
+            continue
+        record: Dict[str, Any] = {}
+        # Order number: extract digits following "Order "
+        comment = row.get("Comment", "") or ""
+        order_no = ""
+        match = re.search(r"Order\s+(\d+)", comment)
+        if match:
+            order_no = match.group(1)
+        record["order_no"] = order_no
+        # Amount supporting troop
+        record["amount_support"] = row.get("Support Troop Amount", "").strip()
+        # Delivery customer: LastName, FirstName
+        last = row.get("LastName", "").strip()
+        first = row.get("FirstName", "").strip()
+        customer = ", ".join(filter(None, [last, first])) if last or first else ""
+        record["customer"] = customer
+        # Delivery city
+        record["city"] = row.get("Town", "").strip()
+        # Delivery address
+        record["address"] = row.get("Street Address", "").strip()
+        # Buyer email
+        record["email"] = row.get("EmailAddress", "").strip()
+        # Bags
+        record["bags"] = row.get("Number of Bags", "").strip()
+        # Route
+        record["route"] = row.get("Delivery Route", "").strip()
+        # ID (sequential among orders)
+        record["id"] = len(records) + 1
+        # Special instructions
+        record["instructions"] = row.get("Delivery Instructions", "").strip()
+        records.append(record)
+        # Flag rows that must be fixed in the sheet before the final print.
+        who = f"{record['customer']} ({record['route']})"
+        if record["instructions"].upper() == "TBD":
+            print(f"WARNING: {who}: Delivery Instructions are still 'TBD'.")
+        if not row.get("Map Link", "").strip():
+            print(f"WARNING: {who}: no Map Link; no map page will be printed.")
     return records
 
 

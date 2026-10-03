@@ -4,6 +4,17 @@ Python utilities that read a CSV of order data with Google Maps links:
 one script generates order form PDFs (receipts); another captures map
 PDFs using headless Chrome.
 
+Recommended: use Claude Code
+
+The recommended way to run this project is with
+[Claude Code](https://claude.com/claude-code). Put the season's CSV export in
+`input/`, open Claude Code in this folder, and ask it to generate the maps
+and order forms from that file. It runs the scripts, checks the PDFs against
+the CSV, and flags data problems in the sheet (missing map links, "TBD"
+instructions, ...) before you print. `CLAUDE.md` records the sheet's
+conventions so it knows what is expected. New to Claude Code? Paste
+`ONBOARDING.md` into it for a guided tour.
+
 Key files
 - `src/generate_order_forms.py` — generates order form PDFs grouped by
   Delivery Route. One combined PDF per route (e.g. `Fairfax_12B.pdf`).
@@ -13,7 +24,8 @@ Key files
   forms via `--maps`, `--orders`, or `--all` (default). Creates `.venv`,
   installs dependencies automatically.
 - `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
-- `input/` — sample CSVs.
+- `input/` — where the season's CSV export goes (not committed: it has
+  customer names and emails).
 
 Quick start
 
@@ -49,6 +61,21 @@ generate_order_forms.py — CSV format
   `Town`, `Street Address`, `EmailAddress`, `Number of Bags`, `Delivery Route`,
   `Delivery Instructions`. Order # is parsed from `Comment` when it matches
   "Order 12345".
+- The full season export from Google Sheets can be used as-is: a title row
+  (e.g. "Fall 2026") above the column names is skipped, and only rows with a
+  positive `Number of Bags` are treated as orders (both scripts). Rows for the
+  same route don't need to be adjacent.
+
+Running tests
+
+```bash
+source .venv/bin/activate
+python3 -m unittest discover tests
+```
+
+The tests use `tests/fixtures/season_export.csv`, a small made-up file in the
+same format as the season export (title row, cp1252, summary rows, ...). They
+don't need Chrome. If the sheet's format changes, update that fixture to match.
 
 Notes & troubleshooting
 - `generate_order_forms.py` requires Pillow and PyPDF2: `pip install -r requirements.txt`

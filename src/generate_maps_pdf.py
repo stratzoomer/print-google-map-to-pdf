@@ -65,6 +65,7 @@ try:
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.common.exceptions import WebDriverException
 except ImportError as exc:  # pragma: no cover
     # When selenium isn't available we set these to None; this allows the
     # script to emit a helpful error at runtime rather than failing on import.
@@ -72,6 +73,7 @@ except ImportError as exc:  # pragma: no cover
     Options = None  # type: ignore
     Service = None  # type: ignore
     WebDriverWait = None  # type: ignore
+    WebDriverException = Exception  # type: ignore
 
 
 def extract_address(link: str) -> Optional[str]:
@@ -208,9 +210,23 @@ def _wait_for_map_ready(driver: "webdriver.Chrome", timeout: float = 20.0) -> No
         pass  # Proceed anyway after timeout; fixed sleep may still help
 
 
+def special_note(comment: str) -> Optional[str]:
+    """Return the special-action note from a ``Comment`` cell, if any.
+
+    In the season sheet, comments typed in red flag something that needs
+    special action (e.g. "Need one pallet").  CSV exports drop the text
+    colour, so any comment other than the usual "Order 12345" is treated
+    as a special-action note.
+    """
+    comment = comment.strip()
+    if not comment or re.fullmatch(r"Order\s+\d+", comment):
+        return None
+    return comment
+
+
 def read_records_from_csv(
     path: str, max_records: Optional[int] = None
-) -> List[Tuple[str, Optional[str], Optional[str]]]:
+) -> List[Tuple[str, Optional[str], Optional[str], Optional[str]]]:
     """Read map links and optional labels from a CSV file.
 
     This helper function supports two CSV formats:
@@ -234,11 +250,11 @@ def read_records_from_csv(
 
     Returns
     -------
-    list[tuple[str, Optional[str], Optional[str]]]
-        A list of ``(url, label, bags)`` tuples.  ``label`` and ``bags`` may
-        be ``None`` if not provided.
+    list[tuple[str, Optional[str], Optional[str], Optional[str]]]
+        A list of ``(url, label, bags, note)`` tuples.  ``label``, ``bags``
+        and ``note`` (see ``special_note``) may be ``None`` if not provided.
     """
-    records: List[Tuple[str, Optional[str], Optional[str]]] = []
+    records: List[Tuple[str, Optional[str], Optional[str], Optional[str]]] = []
     # Read all rows first so that we can inspect the header row.  Using a
     # dedicated list avoids complications with the csv reader state.
     # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports (e.g. 0x92 = smart quote).
@@ -274,6 +290,7 @@ def read_records_from_csv(
     link_index: Optional[int] = None
     label_index: Optional[int] = None
     bags_index: Optional[int] = None
+    comment_index: Optional[int] = None
     start_idx = 0
     if has_header:
         start_idx = header_row_idx + 1
@@ -285,6 +302,8 @@ def read_records_from_csv(
                 label_index = i
             if h in bags_field_names and bags_index is None:
                 bags_index = i
+            if h == "comment" and comment_index is None:
+                comment_index = i
         # If we don't find a link index in the header, treat the first
         # column as the link.
         if link_index is None:
@@ -304,6 +323,12 @@ def read_records_from_csv(
             url = row[link_index].strip()
         if not url:
             continue
+        # When there is a bag count column, only rows with a positive bag
+        # count are orders (the season export is the full customer list).
+        if has_header and bags_index is not None:
+            bags_cell = row[bags_index].strip() if bags_index < len(row) else ""
+            if not re.fullmatch(r"\d+", bags_cell) or int(bags_cell) == 0:
+                continue
         # Extract label, if any
         label: Optional[str] = None
         if label_index is not None and label_index < len(row):
@@ -316,10 +341,28 @@ def read_records_from_csv(
             bags_raw = row[bags_index].strip()
             if bags_raw:
                 bags = bags_raw
-        records.append((url, label, bags))
+        # Extract special-action note from the comment, if any
+        note: Optional[str] = None
+        if comment_index is not None and comment_index < len(row):
+            note = special_note(row[comment_index])
+        records.append((url, label, bags, note))
         if max_records is not None and len(records) >= max_records:
             break
     return records
+
+
+def group_by_label(
+    records: List[Tuple[str, Optional[str], Optional[str], Optional[str]]],
+) -> "dict[Optional[str], List[Tuple[str, Optional[str], Optional[str], Optional[str]]]]":
+    """Group records by label (delivery route), in order of first appearance.
+
+    The input is not necessarily sorted by route, so rows for the same
+    route may be spread throughout the file.
+    """
+    groups: dict = {}
+    for rec in records:
+        groups.setdefault(rec[1], []).append(rec)
+    return groups
 
 
 def get_chrome_driver(chromedriver_path: Optional[str]) -> webdriver.Chrome:
@@ -381,6 +424,7 @@ def print_map_pages(
     labels: Optional[List[Optional[str]]] = None,
     inject_marker: bool = True,
     bag_counts: Optional[List[Optional[str]]] = None,
+    notes: Optional[List[Optional[str]]] = None,
 ) -> List[bytes]:
     """Generate PDF pages for each map link.
 
@@ -434,6 +478,11 @@ def print_map_pages(
         ``links``.  Each entry may be ``None`` if the bag count is not
         provided.  When present, the bag count is displayed after the
         delivery route in the header as ``Number of Bags: <count>``.
+
+    notes : list[Optional[str]] | None, optional
+        Optional sequence of special-action notes corresponding one‑to‑one
+        with ``links``.  When present, the note is printed in red below the
+        delivery route and bag count in the header.
 
     inject_marker : bool, optional
         When ``True`` (default), a simple marker is injected into coordinate‑based
@@ -509,7 +558,10 @@ def print_map_pages(
                 label = labels[idx - 1]
             if bag_counts is not None and idx - 1 < len(bag_counts):
                 bag = bag_counts[idx - 1]
-            if address or label or bag:
+            note: Optional[str] = None
+            if notes is not None and idx - 1 < len(notes):
+                note = notes[idx - 1]
+            if address or label or bag or note:
                 safe_addr = html.escape(address) if address else ""
                 right_parts: List[str] = []
                 if label:
@@ -519,11 +571,16 @@ def print_map_pages(
                     safe_bag = html.escape(bag)
                     right_parts.append("Number of Bags: " + safe_bag)
                 right_text = "&nbsp;&nbsp;".join(right_parts) if right_parts else ""
+                if note:
+                    right_text += (
+                        '<div style="color:#d00000; font-weight:bold; margin-top:4px;">'
+                        + html.escape(note) + '</div>'
+                    )
                 header_html = (
                     '<div style="font-size:12px; margin-top:10px; display:flex; '
                     'justify-content:space-between; width:100%;">'
                     '<span style="margin-left:40px;">' + safe_addr + '</span>'
-                    '<span style="margin-right:40px;">' + right_text + '</span>'
+                    '<div style="margin-right:40px; text-align:right;">' + right_text + '</div>'
                     '</div>'
                 )
                 print_opts["displayHeaderFooter"] = True
@@ -722,35 +779,45 @@ def main() -> None:
     driver = get_chrome_driver(args.driver_path)
     driver.set_window_size(win_width, win_height)
     try:
-        # Group records by their label.  Because the input is sorted on the
-        # second field, we can accumulate consecutive rows with the same
-        # label into a single group and produce one PDF for each.
-        idx = 0
+        # Group records by their label.  The input is not necessarily
+        # sorted by route, so collect all rows for each label (in order of
+        # first appearance) and produce one PDF for each.
         total_groups = 0
-        while idx < len(records):
-            current_label = records[idx][1]
-            group_links: List[str] = []
-            group_labels: List[Optional[str]] = []
-            group_bags: List[Optional[str]] = []
-            while idx < len(records) and records[idx][1] == current_label:
-                group_links.append(records[idx][0])
-                group_labels.append(records[idx][1])
-                group_bags.append(records[idx][2])
-                idx += 1
-            pages = print_map_pages(
-                group_links,
-                driver,
-                orientation_landscape=not args.portrait,
-                page_wait=args.wait,
-                paper_width=args.paper_width,
-                paper_height=args.paper_height,
-                scale=args.scale,
-                use_coordinates=not args.use_original,
-                include_header=not args.no_header,
-                labels=group_labels,
-                inject_marker=not args.no_marker,
-                bag_counts=group_bags,
-            )
+        for current_label, group in group_by_label(records).items():
+            group_links = [rec[0] for rec in group]
+            group_labels = [rec[1] for rec in group]
+            group_bags = [rec[2] for rec in group]
+            group_notes = [rec[3] for rec in group]
+            # Chrome occasionally crashes mid-run; restart it and retry the
+            # route once rather than losing the rest of the run.
+            for attempt in (1, 2):
+                try:
+                    pages = print_map_pages(
+                        group_links,
+                        driver,
+                        orientation_landscape=not args.portrait,
+                        page_wait=args.wait,
+                        paper_width=args.paper_width,
+                        paper_height=args.paper_height,
+                        scale=args.scale,
+                        use_coordinates=not args.use_original,
+                        include_header=not args.no_header,
+                        labels=group_labels,
+                        inject_marker=not args.no_marker,
+                        bag_counts=group_bags,
+                        notes=group_notes,
+                    )
+                    break
+                except WebDriverException as exc:
+                    if attempt == 2:
+                        raise
+                    print(f"Chrome failed on '{current_label}' ({exc.msg}); restarting and retrying.")
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = get_chrome_driver(args.driver_path)
+                    driver.set_window_size(win_width, win_height)
             if pages:
                 if current_label:
                     base_name = re.sub(r"[^A-Za-z0-9]+", "_", current_label.strip())
