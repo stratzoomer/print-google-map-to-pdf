@@ -28,13 +28,13 @@ _None needed for this project._
 
 - **Let Claude Code run the program.** After you put the input file in
   `input/`, ask Claude Code to run it (e.g. "Generate the maps and order
-  forms from `input/Fall-2026-test-2.csv` and check them against the
+  forms from `input/20260914 01 Mulch Sales - Fall 2026.xlsx` and check them against the
   input") instead of running the script yourself. It checks the PDFs
-  against the CSV and points out data problems before you print.
+  against the spreadsheet and points out data problems before you print.
 - **Read the warnings before the final print.** The order-form step warns
   about orders with "TBD" instructions or no map link. Fix those in the
-  Google Sheet, re-export, and run again.
-- **Never commit `input/`.** The season export has customer names and
+  workbook in Dropbox, copy it to `input/` again, and rerun.
+- **Never commit `input/`.** The season workbook has customer names and
   emails. It's in `.gitignore`. The tests use made-up data in
   `tests/fixtures/`.
 - **`CLAUDE.md` holds the sheet's conventions** (the benefactor order,
@@ -43,8 +43,8 @@ _None needed for this project._
 
 ## Get Started
 
-Starter task: export the current season's sheet from Google Sheets as CSV,
-save it in `input/`, and ask Claude Code to generate the maps and order
+Starter task: copy the current season's Excel workbook from Dropbox into
+`input/`, and ask Claude Code to generate the maps and order
 forms from it. Review the PDFs in `output/maps/` and `output/orders/`
 along with Claude's summary of anything that needs fixing in the sheet.
 

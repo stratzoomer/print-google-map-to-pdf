@@ -2,7 +2,8 @@
 generate_order_forms.py
 =======================
 
-This script generates order form PDFs from a CSV input file, grouped by
+This script generates order form PDFs from the season spreadsheet
+(``.xlsx``, first sheet by default, or a CSV export), grouped by
 ``Delivery Route``.  Only rows with a positive ``Number of Bags`` are
 treated as orders, so the full season export can be used directly.
 Each delivery route produces one combined PDF
@@ -35,7 +36,7 @@ Usage
 Run the script from a command prompt.  It requires the Pillow library
 (available by default in this environment).  Example:
 
-    python generate_order_forms.py --input new-data.csv --output forms
+    python generate_order_forms.py --input "Mulch Sales - Fall 2026.xlsx" --output forms
 
 This creates a directory called ``forms`` (if it does not already exist)
 and writes one PDF per delivery route (e.g. ``Fairfax_12B.pdf``), each
@@ -44,15 +45,14 @@ containing all order form pages for that route.
 """
 
 import argparse
-import csv
 import os
 import re
 from collections import OrderedDict
-from io import BytesIO
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
-from PyPDF2 import PdfReader, PdfWriter
+
+from sheet_reader import read_rows
 
 # Page dimensions in points (1 pt = 1/72 in).  8.5x11 in page.
 PAGE_WIDTH = 612
@@ -60,7 +60,7 @@ PAGE_HEIGHT = 792
 
 
 def is_order_row(row: Dict[str, str]) -> bool:
-    """Return True if a CSV row is an actual order.
+    """Return True if a spreadsheet row is an actual order.
 
     The season export is the full customer list, so only rows with a
     positive ``Number of Bags`` and a name or address are orders.  This
@@ -72,13 +72,15 @@ def is_order_row(row: Dict[str, str]) -> bool:
     return bool((row.get("LastName") or "").strip() or (row.get("Street Address") or "").strip())
 
 
-def parse_order_records(path: str) -> List[Dict[str, Any]]:
-    """Parse relevant fields from the CSV input file.
+def parse_order_records(path: str, sheet: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Parse relevant fields from the season spreadsheet.
 
     Parameters
     ----------
     path : str
-        Path to the CSV file.
+        Path to the ``.xlsx`` workbook or a CSV export of it.
+    sheet : str | None
+        Worksheet name for Excel input; defaults to the first sheet.
 
     Returns
     -------
@@ -86,20 +88,10 @@ def parse_order_records(path: str) -> List[Dict[str, Any]]:
         A list of dictionaries containing the extracted fields for each
         record.  The order of the records is preserved.
     """
-    # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports.
-    rows: List[List[str]] = []
-    for encoding in ("utf-8", "cp1252", "latin-1"):
-        try:
-            with open(path, newline="", encoding=encoding) as f:
-                rows = list(csv.reader(f))
-            break
-        except UnicodeDecodeError:
-            if encoding == "latin-1":
-                raise
-            continue
+    rows, _ = read_rows(path, sheet)
     if not rows:
         return []
-    # Find the header row: the Google Sheets export may have a title row
+    # Find the header row: the season sheet has a title row
     # (e.g. "Fall 2026") before the column names.
     header_row_idx = 0
     for i, candidate in enumerate(rows[:10]):
@@ -379,36 +371,35 @@ def save_order_forms(records: List[Dict[str, Any]], output_dir: str) -> None:
         if not base_name:
             base_name = "orders"
         out_path = os.path.join(output_dir, f"{base_name}.pdf")
-        writer = PdfWriter()
-        for rec in group:
-            img = draw_order_form(rec, fonts)
-            buf = BytesIO()
-            img.save(buf, format="PDF")
-            reader = PdfReader(buf)
-            for page in reader.pages:
-                writer.add_page(page)
-        with open(out_path, "wb") as f:
-            writer.write(f)
+        # Write all pages in one go.  Merging one single-page PDF per order
+        # with PyPDF2 mixed up pages (some orders printed twice, others
+        # missing) because every page's objects have the same numbers.
+        images = [draw_order_form(rec, fonts) for rec in group]
+        images[0].save(out_path, format="PDF", save_all=True, append_images=images[1:])
         print(f"Wrote {len(group)} page(s) to '{out_path}'.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate order form PDFs from a CSV input, grouped by "
+        description="Generate order form PDFs from the season spreadsheet, grouped by "
         "Delivery Route.  One combined PDF per route, named after the route."
     )
     parser.add_argument(
         "--input",
         required=True,
-        help="Path to the CSV file containing order data.",
+        help="Path to the season spreadsheet (.xlsx) or a CSV export of it.",
     )
     parser.add_argument(
         "--output",
         required=True,
         help="Directory to write the order form PDFs.",
     )
+    parser.add_argument(
+        "--sheet",
+        help="Worksheet to read from an .xlsx input (default: the first sheet).",
+    )
     args = parser.parse_args()
-    records = parse_order_records(args.input)
+    records = parse_order_records(args.input, args.sheet)
     if not records:
         print("No records found in the input file.")
         return

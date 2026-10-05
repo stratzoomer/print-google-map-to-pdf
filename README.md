@@ -7,8 +7,8 @@ PDFs using headless Chrome.
 Recommended: use Claude Code
 
 The recommended way to run this project is with
-[Claude Code](https://claude.com/claude-code). Put the season's CSV export in
-`input/`, open Claude Code in this folder, and ask it to generate the maps
+[Claude Code](https://claude.com/claude-code). Copy the season's Excel workbook from
+Dropbox into `input/`, open Claude Code in this folder, and ask it to generate the maps
 and order forms from that file. It runs the scripts, checks the PDFs against
 the CSV, and flags data problems in the sheet (missing map links, "TBD"
 instructions, ...) before you print. `CLAUDE.md` records the sheet's
@@ -18,13 +18,18 @@ conventions so it knows what is expected. New to Claude Code? Paste
 Key files
 - `src/generate_order_forms.py` — generates order form PDFs grouped by
   Delivery Route. One combined PDF per route (e.g. `Fairfax_12B.pdf`).
-  Requires Pillow and PyPDF2.
+  Requires Pillow (and openpyxl for `.xlsx` input).
 - `src/generate_maps_pdf.py` — generates map PDFs from Google Maps links.
+- `src/check_workbook.py` — checks run by the wrapper before generating
+  (bag totals and order count vs `BasicOrderStats`, map links vs Street
+  Address) and after (one page per order, each page for the right order).
+- `src/sheet_reader.py` — reads the season workbook (`.xlsx`) or a CSV
+  export for both scripts, including which `Comment` text is red.
 - `run_generate_maps_pdf.sh` — convenience wrapper. Runs maps and/or order
   forms via `--maps`, `--orders`, or `--all` (default). Creates `.venv`,
   installs dependencies automatically.
-- `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow).
-- `input/` — where the season's CSV export goes (not committed: it has
+- `requirements.txt` — Python dependencies (selenium, PyPDF2, Pillow, openpyxl).
+- `input/` — where the season's Excel workbook goes (not committed: it has
   customer names and emails).
 
 Quick start
@@ -36,9 +41,9 @@ Quick start
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # On Windows: .venv\Scripts\activate
-pip install Pillow
+pip install Pillow PyPDF2 openpyxl
 
-python3 src/generate_order_forms.py --input input.csv --output output/forms
+python3 src/generate_order_forms.py --input "input/Mulch Sales - Fall 2026.xlsx" --output output/forms
 ```
 
 Creates one PDF per delivery route (e.g. `Fairfax_12B.pdf`), each
@@ -47,9 +52,9 @@ containing all order forms for that route.
 3. **Wrapper script** — runs both, or either, with venv and deps handled:
 
 ```bash
-./run_generate_maps_pdf.sh input/data.csv              # both (maps + orders)
-./run_generate_maps_pdf.sh --maps input/data.csv       # maps only
-./run_generate_maps_pdf.sh --orders input/data.csv     # order forms only
+./run_generate_maps_pdf.sh "input/Mulch Sales - Fall 2026.xlsx"            # both (maps + orders)
+./run_generate_maps_pdf.sh --maps "input/Mulch Sales - Fall 2026.xlsx"     # maps only
+./run_generate_maps_pdf.sh --orders "input/Mulch Sales - Fall 2026.xlsx"   # order forms only
 ```
 
 Maps require Chrome/Chromium. Order forms do not. With `--all` (default),
@@ -61,7 +66,11 @@ generate_order_forms.py — CSV format
   `Town`, `Street Address`, `EmailAddress`, `Number of Bags`, `Delivery Route`,
   `Delivery Instructions`. Order # is parsed from `Comment` when it matches
   "Order 12345".
-- The full season export from Google Sheets can be used as-is: a title row
+- Input is the season's Excel workbook (`.xlsx`, first sheet `Customers`;
+  pick another with `--sheet`) or a CSV export of it. Red text in `Comment`
+  is printed in red on the map page (CSV input has no colours, so any
+  comment that isn't "Order 12345" is used instead).
+- The full season sheet can be used as-is: a title row
   (e.g. "Fall 2026") above the column names is skipped, and only rows with a
   positive `Number of Bags` are treated as orders (both scripts). Rows for the
   same route don't need to be adjacent.
@@ -74,12 +83,13 @@ python3 -m unittest discover tests
 ```
 
 The tests use `tests/fixtures/season_export.csv`, a small made-up file in the
-same format as the season export (title row, cp1252, summary rows, ...). They
+same format as the season sheet (title row, cp1252, summary rows, ...); the
+`.xlsx` tests build a workbook from it. They
 don't need Chrome. If the sheet's format changes, update that fixture to match.
 
 Notes & troubleshooting
-- `generate_order_forms.py` requires Pillow and PyPDF2: `pip install -r requirements.txt`
-  or `pip install Pillow PyPDF2`.
+- Install dependencies with `pip install -r requirements.txt` (the wrapper
+  does this for you).
 - ChromeDriver version mismatch: omit `--driver-path` to let Selenium
   Manager fetch the correct driver. If using a manual driver, download a
   version matching your Chrome from https://chromedriver.chromium.org and

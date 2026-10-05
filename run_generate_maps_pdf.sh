@@ -4,20 +4,27 @@ set -euo pipefail
 # Wrapper to run generate_maps_pdf.py and/or generate_order_forms.py.
 # Creates/uses .venv and installs dependencies automatically.
 #
-# Usage: $0 [--maps|--orders|--all] <input-csv> [output-dir] [driver-path]
+# Usage: $0 [--maps|--orders|--all] <input-file> [output-dir] [driver-path]
 #
 # Options:
 #   --maps   Run generate_maps_pdf.py only (map PDFs per delivery route)
 #   --orders Run generate_order_forms.py only (order form PDFs per route)
 #   --all    Run both scripts (default)
+#   --skip-checks  Generate even if the workbook checks fail (not recommended)
+#
+# Before generating, src/check_workbook.py checks the workbook (bag totals,
+# order count vs BasicOrderStats, map links vs Street Address) and stops the
+# run if anything is off.  Afterwards it checks the PDFs have one page per
+# order.
 #
 # Examples:
-#   ./run_generate_maps_pdf.sh input/data.csv
-#   ./run_generate_maps_pdf.sh --maps input/data.csv output/maps
-#   ./run_generate_maps_pdf.sh --orders input/data.csv output/forms
+#   ./run_generate_maps_pdf.sh "input/Mulch Sales - Fall 2026.xlsx"
+#   ./run_generate_maps_pdf.sh --maps "input/Mulch Sales - Fall 2026.xlsx" output/maps
+#   ./run_generate_maps_pdf.sh --orders "input/Mulch Sales - Fall 2026.xlsx" output/forms
 
 RUN_MAPS=false
 RUN_ORDERS=false
+SKIP_CHECKS=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,23 +41,28 @@ while [[ $# -gt 0 ]]; do
       RUN_ORDERS=true
       shift
       ;;
+    --skip-checks)
+      SKIP_CHECKS=true
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--maps|--orders|--all] <input-csv> [output-dir] [driver-path]"
+      echo "Usage: $0 [--maps|--orders|--all] <input-file> [output-dir] [driver-path]"
       echo ""
       echo "Options:"
       echo "  --maps   Run generate_maps_pdf.py only (map PDFs per delivery route)"
       echo "  --orders Run generate_order_forms.py only (order form PDFs per route)"
       echo "  --all    Run both scripts (default)"
+      echo "  --skip-checks  Generate even if the workbook checks fail (not recommended)"
       echo ""
       echo "Examples:"
-      echo "  $0 input/data.csv              # run both (maps + orders)"
-      echo "  $0 --maps input/data.csv       # maps only"
-      echo "  $0 --orders input/data.csv     # order forms only"
+      echo "  $0 'input/Mulch Sales - Fall 2026.xlsx'            # run both (maps + orders)"
+      echo "  $0 --maps 'input/Mulch Sales - Fall 2026.xlsx'     # maps only"
+      echo "  $0 --orders 'input/Mulch Sales - Fall 2026.xlsx'   # order forms only"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--maps|--orders|--all] <input-csv> [output-dir] [driver-path]"
+      echo "Usage: $0 [--maps|--orders|--all] <input-file> [output-dir] [driver-path]"
       exit 2
       ;;
     *)
@@ -66,7 +78,7 @@ if ! $RUN_MAPS && ! $RUN_ORDERS; then
 fi
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 [--maps|--orders|--all] <input-csv> [output-dir] [driver-path]"
+  echo "Usage: $0 [--maps|--orders|--all] <input-file> [output-dir] [driver-path]"
   exit 2
 fi
 
@@ -105,6 +117,21 @@ else
   ORDERS_OUTPUT="$OUTPUT_BASE"
 fi
 
+echo ""
+echo "Checking the workbook before generating"
+if ! python3 src/check_workbook.py --input "$INPUT"; then
+  if $SKIP_CHECKS; then
+    echo "Continuing anyway (--skip-checks)."
+  else
+    echo "Stopping: fix the workbook, or rerun with --skip-checks." >&2
+    exit 5
+  fi
+fi
+
+# Remove PDFs from an earlier run so the output only has this run's PDFs.
+if $RUN_MAPS; then rm -f "$MAPS_OUTPUT"/*.pdf; fi
+if $RUN_ORDERS; then rm -f "$ORDERS_OUTPUT"/*.pdf; fi
+
 if $RUN_MAPS; then
   mkdir -p "$(dirname "$MAPS_OUTPUT")"
   echo ""
@@ -136,6 +163,13 @@ if $RUN_ORDERS; then
     --input "$INPUT" \
     --output "$ORDERS_OUTPUT"
 fi
+
+echo ""
+echo "Checking the generated PDFs"
+CHECK_ARGS=(--input "$INPUT")
+if $RUN_MAPS; then CHECK_ARGS+=(--maps-dir "$MAPS_OUTPUT"); fi
+if $RUN_ORDERS; then CHECK_ARGS+=(--orders-dir "$ORDERS_OUTPUT"); fi
+python3 src/check_workbook.py "${CHECK_ARGS[@]}"
 
 echo ""
 echo "Done."

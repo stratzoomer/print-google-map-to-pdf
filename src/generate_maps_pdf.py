@@ -2,7 +2,8 @@
 generate_maps_pdf.py
 ====================
 
-This script reads a CSV file containing Google Map links (one per row),
+This script reads the season spreadsheet (.xlsx) or a CSV file containing
+Google Map links (one per row),
 extracts the geographic coordinates from each link, loads an uncluttered
 map view for those coordinates with a marker, and prints that view to
 PDF.  All individual PDF pages are combined into a single,
@@ -45,7 +46,6 @@ Limitations
 
 import argparse
 import base64
-import csv
 import os
 import re
 import sys
@@ -57,6 +57,12 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import html
 
 from PyPDF2 import PdfReader, PdfWriter, PdfMerger
+
+from addresses import same_street_address
+from sheet_reader import read_rows
+
+# (map link, delivery route, number of bags, special-action note, street address)
+Record = Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]
 
 # Selenium imports are deferred so that the script's help can be printed
 # without requiring the package to be installed.
@@ -180,6 +186,38 @@ def _strip_auth_params(url: str) -> str:
     )
 
 
+# The logo at the top left of Google Maps' print layout.
+GOOGLE_MAPS_PRINT_LOGO = (
+    "https://www.google.com/images/branding/lockups/1x/lockup_maps_color_131x24dp.png"
+)
+
+
+def _preload_image(driver: "webdriver.Chrome", url: str, timeout: float = 3.0) -> None:
+    """Load an image into the browser cache so it is ready when printing."""
+    try:
+        driver.execute_script(
+            "window.__preload = new Image(); window.__preload.src = arguments[0];", url
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if driver.execute_script("return window.__preload.complete;"):
+                return
+            time.sleep(0.1)
+    except Exception:
+        pass  # Not essential; the page prints without the logo
+
+
+def _loaded_place_name(driver: "webdriver.Chrome") -> Optional[str]:
+    """Return the name of the place Google Maps loaded (e.g. "100 Maple Ct")."""
+    try:
+        name = driver.execute_script(
+            "var h = document.querySelector('h1'); return h ? h.textContent.trim() : null;"
+        )
+        return name or None
+    except Exception:
+        return None
+
+
 def _is_map_ready(driver: "webdriver.Chrome") -> bool:
     """Return True if the page has a large map canvas (map has rendered)."""
     try:
@@ -214,9 +252,10 @@ def special_note(comment: str) -> Optional[str]:
     """Return the special-action note from a ``Comment`` cell, if any.
 
     In the season sheet, comments typed in red flag something that needs
-    special action (e.g. "Need one pallet").  CSV exports drop the text
-    colour, so any comment other than the usual "Order 12345" is treated
-    as a special-action note.
+    special action (e.g. "Need one pallet").  This is the fallback for CSV
+    exports, which drop the text colour: any comment other than the usual
+    "Order 12345" is treated as a special-action note.  For ``.xlsx``
+    input the red text itself is used instead.
     """
     comment = comment.strip()
     if not comment or re.fullmatch(r"Order\s+\d+", comment):
@@ -224,12 +263,13 @@ def special_note(comment: str) -> Optional[str]:
     return comment
 
 
-def read_records_from_csv(
-    path: str, max_records: Optional[int] = None
-) -> List[Tuple[str, Optional[str], Optional[str], Optional[str]]]:
-    """Read map links and optional labels from a CSV file.
+def read_records(
+    path: str, max_records: Optional[int] = None, sheet: Optional[str] = None
+) -> List[Record]:
+    """Read map links and optional labels from the season spreadsheet.
 
-    This helper function supports two CSV formats:
+    The input is the ``.xlsx`` workbook (``sheet``, default the first
+    sheet) or a CSV file.  This helper function supports two layouts:
 
     1. **Positional format** – each row contains the map URL in the first
        column and an optional label in the second column.  Any additional
@@ -244,30 +284,23 @@ def read_records_from_csv(
     Parameters
     ----------
     path : str
-        Path to the CSV file.
+        Path to the ``.xlsx`` workbook or CSV file.
     max_records : int | None, optional
         If given, only the first ``max_records`` records are returned.
+    sheet : str | None, optional
+        Worksheet name for Excel input; defaults to the first sheet.
 
     Returns
     -------
     list[tuple[str, Optional[str], Optional[str], Optional[str]]]
-        A list of ``(url, label, bags, note)`` tuples.  ``label``, ``bags``
-        and ``note`` (see ``special_note``) may be ``None`` if not provided.
+        A list of ``(url, label, bags, note, street)`` tuples.  ``label``,
+        ``bags``, ``note`` and ``street`` (the ``Street Address`` column) may
+        be ``None`` if not provided.  ``note`` is the red
+        text in ``Comment`` for Excel input (see ``special_note`` for CSV).
     """
-    records: List[Tuple[str, Optional[str], Optional[str], Optional[str]]] = []
-    # Read all rows first so that we can inspect the header row.  Using a
-    # dedicated list avoids complications with the csv reader state.
-    # Try UTF-8 first; fall back to cp1252 for Excel/Windows exports (e.g. 0x92 = smart quote).
-    for encoding in ("utf-8", "cp1252", "latin-1"):
-        try:
-            with open(path, newline="", encoding=encoding) as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            break
-        except UnicodeDecodeError:
-            if encoding == "latin-1":
-                raise
-            continue
+    records: List[Record] = []
+    # Read all rows first so that we can inspect the header row.
+    rows, red_text = read_rows(path, sheet)
     if not rows:
         return records
     # Known field names for map link, label and bag count
@@ -291,6 +324,7 @@ def read_records_from_csv(
     label_index: Optional[int] = None
     bags_index: Optional[int] = None
     comment_index: Optional[int] = None
+    street_index: Optional[int] = None
     start_idx = 0
     if has_header:
         start_idx = header_row_idx + 1
@@ -304,6 +338,8 @@ def read_records_from_csv(
                 bags_index = i
             if h == "comment" and comment_index is None:
                 comment_index = i
+            if h == "street address" and street_index is None:
+                street_index = i
         # If we don't find a link index in the header, treat the first
         # column as the link.
         if link_index is None:
@@ -314,7 +350,8 @@ def read_records_from_csv(
         label_index = 1
         bags_index = 2
     # Process each data row starting from start_idx
-    for row in rows[start_idx:]:
+    for row_idx in range(start_idx, len(rows)):
+        row = rows[row_idx]
         if not row:
             continue
         # Extract URL
@@ -344,16 +381,22 @@ def read_records_from_csv(
         # Extract special-action note from the comment, if any
         note: Optional[str] = None
         if comment_index is not None and comment_index < len(row):
-            note = special_note(row[comment_index])
-        records.append((url, label, bags, note))
+            if red_text is None:
+                note = special_note(row[comment_index])
+            else:
+                note = red_text.get((row_idx, comment_index)) or None
+        street: Optional[str] = None
+        if street_index is not None and street_index < len(row):
+            street = row[street_index].strip() or None
+        records.append((url, label, bags, note, street))
         if max_records is not None and len(records) >= max_records:
             break
     return records
 
 
 def group_by_label(
-    records: List[Tuple[str, Optional[str], Optional[str], Optional[str]]],
-) -> "dict[Optional[str], List[Tuple[str, Optional[str], Optional[str], Optional[str]]]]":
+    records: List[Record],
+) -> "dict[Optional[str], List[Record]]":
     """Group records by label (delivery route), in order of first appearance.
 
     The input is not necessarily sorted by route, so rows for the same
@@ -425,6 +468,8 @@ def print_map_pages(
     inject_marker: bool = True,
     bag_counts: Optional[List[Optional[str]]] = None,
     notes: Optional[List[Optional[str]]] = None,
+    expected_streets: Optional[List[Optional[str]]] = None,
+    mismatches: Optional[List[str]] = None,
 ) -> List[bytes]:
     """Generate PDF pages for each map link.
 
@@ -484,6 +529,12 @@ def print_map_pages(
         with ``links``.  When present, the note is printed in red below the
         delivery route and bag count in the header.
 
+    expected_streets : list[Optional[str]] | None, optional
+        Optional sequence of street addresses (from the sheet) corresponding
+        one‑to‑one with ``links``.  Before printing, the place Google Maps
+        actually loaded is compared with it; each mismatch is printed as a
+        warning and appended to ``mismatches`` (when given).
+
     inject_marker : bool, optional
         When ``True`` (default), a simple marker is injected into coordinate‑based
         maps.  This marker consists of a small red dot with a white border
@@ -516,6 +567,15 @@ def print_map_pages(
         driver.get(load_url)
         _wait_for_map_ready(driver, timeout=20.0)
         time.sleep(page_wait)
+        # Check the place Google loaded is the address on the order.
+        expected = expected_streets[idx - 1] if expected_streets and idx - 1 < len(expected_streets) else None
+        if expected:
+            loaded = _loaded_place_name(driver)
+            if not loaded or not same_street_address(loaded, expected):
+                msg = f"map for '{expected}' shows '{loaded or 'no place'}'"
+                print(f"WARNING: {msg}.")
+                if mismatches is not None:
+                    mismatches.append(msg)
         # Inject a simple marker at the map centre when using coordinate view.
         if inject_marker and use_coordinates and coords is not None:
             try:
@@ -561,6 +621,22 @@ def print_map_pages(
             note: Optional[str] = None
             if notes is not None and idx - 1 < len(notes):
                 note = notes[idx - 1]
+            # Google's print layout shows the Google Maps logo at the top
+            # left and the street only (e.g. "100 Maple Ct") as a centred
+            # title.  Hide that title when printing; our header shows the
+            # full address (with town and zip code) in its place instead.
+            # Google only fetches its logo when the page is printed, and it
+            # often isn't loaded in time, so load it beforehand.
+            _preload_image(driver, GOOGLE_MAPS_PRINT_LOGO)
+            if address:
+                try:
+                    driver.execute_script(
+                        "var st = document.createElement('style');"
+                        "st.textContent = '@media print { h1 { visibility: hidden !important; } }';"
+                        "document.head.appendChild(st);"
+                    )
+                except Exception:
+                    pass
             if address or label or bag or note:
                 safe_addr = html.escape(address) if address else ""
                 right_parts: List[str] = []
@@ -576,10 +652,13 @@ def print_map_pages(
                         '<div style="color:#d00000; font-weight:bold; margin-top:4px;">'
                         + html.escape(note) + '</div>'
                     )
+                # Three columns: the left is kept clear for Google's logo.
                 header_html = (
-                    '<div style="font-size:12px; margin-top:10px; display:flex; '
-                    'justify-content:space-between; width:100%;">'
-                    '<span style="margin-left:40px;">' + safe_addr + '</span>'
+                    '<div style="font-size:12px; margin-top:10px; display:grid; '
+                    'grid-template-columns:1fr auto 1fr; width:100%;">'
+                    '<span></span>'
+                    '<span style="text-align:center; font-family:Arial, Helvetica, sans-serif; '
+                    'font-size:16px; margin-top:4px;">' + safe_addr + '</span>'
                     '<div style="margin-right:40px; text-align:right;">' + right_text + '</div>'
                     '</div>'
                 )
@@ -639,11 +718,17 @@ def main() -> None:
         "--input",
         required=True,
         help=(
-            "Path to the CSV file containing Google Maps links.  "
-            "Each row should contain a Google Maps URL in the first column.  "
+            "Path to the season spreadsheet (.xlsx) or a CSV file containing "
+            "Google Maps links.  With a header row, the Map Link, Delivery "
+            "Route, Number of Bags and Comment columns are used.  Otherwise "
+            "each row should contain a Google Maps URL in the first column.  "
             "A second column may contain a label that will appear on the right "
             "side of the header for that map."
         ),
+    )
+    parser.add_argument(
+        "--sheet",
+        help="Worksheet to read from an .xlsx input (default: the first sheet).",
     )
     parser.add_argument(
         "--output",
@@ -754,7 +839,7 @@ def main() -> None:
     # Read links and optional labels from the input file.  Each row may
     # contain a URL in the first column and a label in the second column.  Any
     # additional columns are ignored.  Labels may be None if absent.
-    records = read_records_from_csv(args.input, max_records=args.limit)
+    records = read_records(args.input, max_records=args.limit, sheet=args.sheet)
     if not records:
         print("No valid links found in the input file.")
         sys.exit(1)
@@ -783,14 +868,17 @@ def main() -> None:
         # sorted by route, so collect all rows for each label (in order of
         # first appearance) and produce one PDF for each.
         total_groups = 0
+        mismatches: List[str] = []
         for current_label, group in group_by_label(records).items():
             group_links = [rec[0] for rec in group]
             group_labels = [rec[1] for rec in group]
             group_bags = [rec[2] for rec in group]
             group_notes = [rec[3] for rec in group]
+            group_streets = [rec[4] for rec in group]
             # Chrome occasionally crashes mid-run; restart it and retry the
             # route once rather than losing the rest of the run.
             for attempt in (1, 2):
+                group_mismatches: List[str] = []
                 try:
                     pages = print_map_pages(
                         group_links,
@@ -806,7 +894,10 @@ def main() -> None:
                         inject_marker=not args.no_marker,
                         bag_counts=group_bags,
                         notes=group_notes,
+                        expected_streets=group_streets,
+                        mismatches=group_mismatches,
                     )
+                    mismatches.extend(group_mismatches)
                     break
                 except WebDriverException as exc:
                     if attempt == 2:
@@ -829,6 +920,12 @@ def main() -> None:
                 merge_pdf_pages(pages, output_path)
                 print(f"Successfully wrote {len(pages)} page(s) to '{output_path}'.")
                 total_groups += 1
+        if mismatches:
+            print(f"MAP CHECK: {len(mismatches)} map(s) not for the order's Street Address:")
+            for msg in mismatches:
+                print(f"  - {msg}")
+        else:
+            print(f"MAP CHECK: all {len(records)} map(s) are for the order's Street Address.")
         if total_groups == 0:
             print("No PDF pages were created; aborting.")
             sys.exit(1)
