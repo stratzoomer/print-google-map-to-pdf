@@ -28,6 +28,9 @@ Fields and their mapping
 * **Bags** – the ``Number of Bags`` column.
 * **Route** – the ``Delivery Route`` column.
 * **ID** – a sequential identifier based on the order's position in the input.
+* **Stop** – "3 of 7": the stop's place on its route's single pass (with
+  ``--stop-order``, made by ``route_order.py``).  The route's pages are
+  printed in that order.
 * **Special Instructions** – the ``Delivery Instructions`` column, if present.
 
 Usage
@@ -52,6 +55,7 @@ from typing import List, Dict, Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
+from route_order import in_stop_order, load_stop_order, stop_label
 from sheet_reader import read_rows
 
 # Page dimensions in points (1 pt = 1/72 in).  8.5x11 in page.
@@ -101,11 +105,11 @@ def parse_order_records(path: str, sheet: Optional[str] = None) -> List[Dict[str
     header = [c.strip() for c in rows[header_row_idx]]
 
     records: List[Dict[str, Any]] = []
-    for values in rows[header_row_idx + 1:]:
-        row = dict(zip(header, values))
+    for row_idx in range(header_row_idx + 1, len(rows)):
+        row = dict(zip(header, rows[row_idx]))
         if not is_order_row(row):
             continue
-        record: Dict[str, Any] = {}
+        record: Dict[str, Any] = {"row": row_idx + 1}  # the row number in the sheet
         # Order number: extract digits following "Order "
         comment = row.get("Comment", "") or ""
         order_no = ""
@@ -132,8 +136,11 @@ def parse_order_records(path: str, sheet: Optional[str] = None) -> List[Dict[str
         record["route"] = row.get("Delivery Route", "").strip()
         # ID (sequential among orders)
         record["id"] = len(records) + 1
-        # Special instructions
-        record["instructions"] = row.get("Delivery Instructions", "").strip()
+        # Special instructions.  The fallback font has no em/en dash (it
+        # prints a box), so use a hyphen.
+        record["instructions"] = (
+            row.get("Delivery Instructions", "").strip().replace("\u2014", " - ").replace("\u2013", "-")
+        )
         records.append(record)
         # Flag rows that must be fixed in the sheet before the final print.
         who = f"{record['customer']} ({record['route']})"
@@ -328,6 +335,21 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
         width=1,
     )
     draw.text((id_field_x + 4, y - 6 + 4), str(record.get("id", "")), font=fonts["value"], fill=(0, 0, 0))
+    # Stop number on the route's single pass, to the right of the ID
+    if record.get("stop"):
+        stop_label_x = id_field_x + id_field_width + 40
+        draw.text((stop_label_x, y), "Stop", font=fonts["label"], fill=(0, 0, 0))
+        stop_field_x = stop_label_x + 40
+        stop_field_width = 80
+        draw.rectangle(
+            [
+                (stop_field_x, y - 6),
+                (stop_field_x + stop_field_width, y - 6 + 24),
+            ],
+            outline=border_color,
+            width=1,
+        )
+        draw.text((stop_field_x + 4, y - 6 + 4), record["stop"], font=fonts["value"], fill=(0, 0, 0))
     y += 40
 
     # Bottom line: static text
@@ -342,7 +364,27 @@ def draw_order_form(record: Dict[str, Any], fonts: Dict[str, ImageFont.FreeTypeF
     return img
 
 
-def save_order_forms(records: List[Dict[str, Any]], output_dir: str) -> None:
+def route_groups(
+    records: List[Dict[str, Any]], stops: Optional[Dict[int, Any]] = None
+) -> "OrderedDict[str, List[Dict[str, Any]]]":
+    """Group records by delivery route, in the order their pages are printed.
+
+    With ``stops`` (see ``route_order.load_stop_order``) each route's
+    records are in stop order and get their ``"stop"`` ("3 of 7").
+    """
+    groups: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+    for rec in records:
+        groups.setdefault(rec.get("route", "") or "", []).append(rec)
+    for route_key, group in groups.items():
+        groups[route_key] = in_stop_order(group, lambda r: r.get("row"), stops)
+        for rec in groups[route_key]:
+            rec["stop"] = stop_label(rec.get("row"), stops)
+    return groups
+
+
+def save_order_forms(
+    records: List[Dict[str, Any]], output_dir: str, stops: Optional[Dict[int, Any]] = None
+) -> None:
     """Generate and save order form PDFs grouped by delivery route.
 
     Parameters
@@ -351,6 +393,9 @@ def save_order_forms(records: List[Dict[str, Any]], output_dir: str) -> None:
         Parsed records with fields to populate.
     output_dir : str
         Directory where the PDFs will be saved.  Created if missing.
+    stops : dict | None
+        Stop order (``route_order.load_stop_order``); pages are printed in
+        stop order and numbered "Stop 3 of 7".
 
     Notes
     -----
@@ -360,13 +405,7 @@ def save_order_forms(records: List[Dict[str, Any]], output_dir: str) -> None:
     """
     fonts = load_fonts()
     os.makedirs(output_dir, exist_ok=True)
-    route_groups: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
-    for rec in records:
-        route = rec.get("route", "") or ""
-        if route not in route_groups:
-            route_groups[route] = []
-        route_groups[route].append(rec)
-    for route_key, group in route_groups.items():
+    for route_key, group in route_groups(records, stops).items():
         base_name = re.sub(r"[^A-Za-z0-9]+", "_", route_key.strip()) if route_key else "orders"
         if not base_name:
             base_name = "orders"
@@ -398,12 +437,17 @@ def main() -> None:
         "--sheet",
         help="Worksheet to read from an .xlsx input (default: the first sheet).",
     )
+    parser.add_argument(
+        "--stop-order",
+        help="Stop order file from route_order.py: print each route's forms in that order.",
+    )
     args = parser.parse_args()
     records = parse_order_records(args.input, args.sheet)
     if not records:
         print("No records found in the input file.")
         return
-    save_order_forms(records, args.output)
+    stops = load_stop_order(args.stop_order) if args.stop_order else None
+    save_order_forms(records, args.output, stops)
 
 
 if __name__ == "__main__":

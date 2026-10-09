@@ -59,10 +59,12 @@ import html
 from PyPDF2 import PdfReader, PdfWriter, PdfMerger
 
 from addresses import same_street_address
+from route_order import in_stop_order, load_stop_order, stop_label
 from sheet_reader import read_rows
 
-# (map link, delivery route, number of bags, special-action note, street address)
-Record = Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]
+# (map link, delivery route, number of bags, special-action note, street address,
+#  row number in the sheet)
+Record = Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], int]
 
 # Selenium imports are deferred so that the script's help can be printed
 # without requiring the package to be installed.
@@ -293,9 +295,9 @@ def read_records(
     Returns
     -------
     list[tuple[str, Optional[str], Optional[str], Optional[str]]]
-        A list of ``(url, label, bags, note, street)`` tuples.  ``label``,
+        A list of ``(url, label, bags, note, street, row)`` tuples.  ``label``,
         ``bags``, ``note`` and ``street`` (the ``Street Address`` column) may
-        be ``None`` if not provided.  ``note`` is the red
+        be ``None`` if not provided; ``row`` is the row number in the sheet.  ``note`` is the red
         text in ``Comment`` for Excel input (see ``special_note`` for CSV).
     """
     records: List[Record] = []
@@ -388,7 +390,7 @@ def read_records(
         street: Optional[str] = None
         if street_index is not None and street_index < len(row):
             street = row[street_index].strip() or None
-        records.append((url, label, bags, note, street))
+        records.append((url, label, bags, note, street, row_idx + 1))
         if max_records is not None and len(records) >= max_records:
             break
     return records
@@ -470,6 +472,7 @@ def print_map_pages(
     notes: Optional[List[Optional[str]]] = None,
     expected_streets: Optional[List[Optional[str]]] = None,
     mismatches: Optional[List[str]] = None,
+    stops: Optional[List[Optional[str]]] = None,
 ) -> List[bytes]:
     """Generate PDF pages for each map link.
 
@@ -534,6 +537,11 @@ def print_map_pages(
         one‑to‑one with ``links``.  Before printing, the place Google Maps
         actually loaded is compared with it; each mismatch is printed as a
         warning and appended to ``mismatches`` (when given).
+
+    stops : list[Optional[str]] | None, optional
+        Optional sequence of stop numbers (e.g. ``"3 of 7"``) corresponding
+        one‑to‑one with ``links``.  When present, ``Stop 3 of 7`` is printed
+        in bold under the address in the header.
 
     inject_marker : bool, optional
         When ``True`` (default), a simple marker is injected into coordinate‑based
@@ -621,6 +629,9 @@ def print_map_pages(
             note: Optional[str] = None
             if notes is not None and idx - 1 < len(notes):
                 note = notes[idx - 1]
+            stop: Optional[str] = None
+            if stops is not None and idx - 1 < len(stops):
+                stop = stops[idx - 1]
             # Google's print layout shows the Google Maps logo at the top
             # left and the street only (e.g. "100 Maple Ct") as a centred
             # title.  Hide that title when printing; our header shows the
@@ -637,7 +648,7 @@ def print_map_pages(
                     )
                 except Exception:
                     pass
-            if address or label or bag or note:
+            if address or label or bag or note or stop:
                 safe_addr = html.escape(address) if address else ""
                 right_parts: List[str] = []
                 if label:
@@ -651,6 +662,12 @@ def print_map_pages(
                     right_text += (
                         '<div style="color:#d00000; font-weight:bold; margin-top:4px;">'
                         + html.escape(note) + '</div>'
+                    )
+                # The stop number goes on its own line under the address.
+                if stop:
+                    safe_addr += (
+                        '<div style="font-size:13px; font-weight:bold; margin-top:3px;">Stop '
+                        + html.escape(stop) + '</div>'
                     )
                 # Three columns: the left is kept clear for Google's logo.
                 header_html = (
@@ -814,6 +831,10 @@ def main() -> None:
             "place card by using the coordinate view."
         ),
     )
+    parser.add_argument(
+        "--stop-order",
+        help="Stop order file from route_order.py: print each route's maps in that order.",
+    )
 
     parser.add_argument(
         "--no-header",
@@ -843,9 +864,7 @@ def main() -> None:
     if not records:
         print("No valid links found in the input file.")
         sys.exit(1)
-    links: List[str] = [rec[0] for rec in records]
-    labels_list: List[Optional[str]] = [rec[1] for rec in records]
-    bags_list: List[Optional[str]] = [rec[2] for rec in records]
+    stop_order = load_stop_order(args.stop_order) if args.stop_order else None
 
     # Prepare the output directory.  If the provided output path is not an
     # existing directory, attempt to create it.  This directory will hold
@@ -870,6 +889,8 @@ def main() -> None:
         total_groups = 0
         mismatches: List[str] = []
         for current_label, group in group_by_label(records).items():
+            group = in_stop_order(group, lambda rec: rec[5], stop_order)
+            group_stops = [stop_label(rec[5], stop_order) for rec in group]
             group_links = [rec[0] for rec in group]
             group_labels = [rec[1] for rec in group]
             group_bags = [rec[2] for rec in group]
@@ -896,6 +917,7 @@ def main() -> None:
                         notes=group_notes,
                         expected_streets=group_streets,
                         mismatches=group_mismatches,
+                        stops=group_stops,
                     )
                     mismatches.extend(group_mismatches)
                     break

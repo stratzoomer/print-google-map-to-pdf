@@ -23,6 +23,14 @@ Key files
 - `src/check_workbook.py` — checks run by the wrapper before generating
   (bag totals and order count vs `BasicOrderStats`, map links vs Street
   Address) and after (one page per order, each page for the right order).
+- `src/route_order.py` — puts each route's stops in the order with the
+  shortest driving distance for a single pass by the delivery truck, starting
+  at the Sideburn Run Recreation Association parking lot (10603 Zion Dr).
+  Needs a Google Maps API key with the Routes API enabled. The wrapper asks
+  for the key (or reads `GOOGLE_MAPS_API_KEY`) and never saves it. It writes
+  `output/stop_order.json`, and both scripts print pages in that order
+  (`--stop-order`), numbered "Stop n of N". Without a key (or with
+  `--no-route-order`), pages stay in spreadsheet order.
 - `src/sheet_reader.py` — reads the season workbook (`.xlsx`) or a CSV
   export for both scripts, including which `Comment` text is red.
 - `run_generate_maps_pdf.sh` — convenience wrapper. Runs maps and/or order
@@ -57,7 +65,17 @@ containing all order forms for that route.
 ./run_generate_maps_pdf.sh --orders "input/Mulch Sales - Fall 2026.xlsx"   # order forms only
 ```
 
-Maps require Chrome/Chromium. Order forms do not. With `--all` (default),
+Maps require Chrome/Chromium. Order forms do not (but the wrapper's stop
+ordering uses Chrome to find the pin of map links that only have the map's
+centre).
+
+Route ordering: run in a terminal, the wrapper asks for a Google Maps API key
+(the input is hidden; press Enter to skip). You can also set it for one run:
+`GOOGLE_MAPS_API_KEY='...' ./run_generate_maps_pdf.sh "input/..."`. Never
+commit the key. To get one: create a Google Cloud project with billing, enable
+the **Routes API**, and create an API key restricted to it (a budget alert is
+a good idea). Each run needs about (stops + 1)² distances per route, about
+1,400 for a season; distances already fetched are cached in `output/`. With `--all` (default),
 output goes to `output/maps/` and `output/orders/`. Pass a second arg for a
 custom output dir. Use a third arg for a custom ChromeDriver path.
 

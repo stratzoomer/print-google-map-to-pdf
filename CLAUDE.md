@@ -33,9 +33,39 @@ from `input/` into it (customer names/emails).
   printed in red in the map page header, under the delivery route. With CSV
   input (no colours), any comment that isn't "Order 12345" is used instead.
 
+## Stop order (single pass per delivery route)
+
+The trucks start at the **Sideburn Run Recreation Association** parking lot,
+10603 Zion Dr, Fairfax, VA 22032 (`START` in `src/route_order.py`). With a
+Google Maps API key, the wrapper runs `src/route_order.py` after the checks
+below pass. It puts each route's stops in the order with the shortest total
+driving distance from there, using the Routes API (no traffic). The truck
+doesn't return, so the pass can end at any stop. The result goes to
+`output/stop_order.json`, and the distances are cached in
+`output/driving_distances.json`. Maps and order forms are printed in that
+order, and each page shows "Stop n of N". Links without a pin
+(`!3d…!4d…`, only the map centre `@…`) are opened in Chrome to find the pin.
+A route with stops far apart (e.g. `Outlier`) still gets an order, but it may
+not be one trip.
+
+**The API key:**
+- At the start of every generation, ask the user for the Google Maps API key,
+  or whether to skip route ordering. Don't reuse a key from earlier in the
+  conversation without asking.
+- Pass it only to that command, as an environment variable:
+  `GOOGLE_MAPS_API_KEY='<key>' ./run_generate_maps_pdf.sh "<workbook>"`.
+- Never write the key to a file, a commit, a log or a message, and never
+  echo it back.
+- If the user has no key or doesn't want ordering, run with
+  `--no-route-order`. Each route's maps and order forms then stay in
+  spreadsheet order (the same order in both), with no stop numbers.
+- If the key is refused, the run stops (exit 6) with Google's reason. Report
+  it, and ask whether to retry with another key or go on without ordering.
+
 ## Checks when generating the maps and order forms
 
-Always generate with `./run_generate_maps_pdf.sh "<workbook>"`. It runs
+Always generate with `./run_generate_maps_pdf.sh "<workbook>"` (see above
+for the API key). It runs
 `src/check_workbook.py` just before generating and stops if a check fails
 (fix the workbook, don't reach for `--skip-checks` without asking):
 
@@ -45,22 +75,26 @@ Always generate with `./run_generate_maps_pdf.sh "<workbook>"`. It runs
 2. The number of orders = `Orders` (column B) on `BasicOrderStats`, and every
    order has a `Map Link`.
 3. Each `Map Link` is for the order's `Street Address` (column H).
+4. Sometimes the delivery instructions can be incorrectly in the `Comment` field, as opposed to the `Delivery Instructions`. Report any that is found to the user.
 
 While printing, the maps script also compares the place Google Maps actually
 loaded with `Street Address` for every map (`MAP CHECK` summary at the end).
 After generating, the wrapper checks both `output/maps/` and
 `output/orders/` have one page per order (total = `BasicOrderStats` Orders,
-and per route) and that every page is for the right order: each order form
-page is compared with the form drawn for that order, and each map page's
-title must be that order's address. (Page counts alone are not enough: a
+and per route), that every order is a stop on its own route in
+`stop_order.json` (when the stops were ordered), and that every page is for
+the right order, in stop order: each order form page (including its "Stop n of N") is compared with
+the form drawn for that order, and each map page's title must be that
+order's address. (Page counts alone are not enough: a
 PDF-merging bug once printed some order forms twice and dropped others
 while the page counts still matched.)
 
 Then spot check at least 10% of the map pages and of the order form pages
 (chosen at random, across routes) by rendering them and looking: the title
-address, the pin, the route, the bag count and any red note on the maps, and
-the customer, address, bags, amount and instructions on the order forms,
-must match that order's row.
+address, the pin, the route, the bag count, the stop number and any red note
+on the maps, and the customer, address, bags, amount, instructions and stop
+number on the order forms, must match that order's row and
+`stop_order.json`.
 
 Report any failures to the user with the rows involved.
 

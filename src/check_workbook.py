@@ -18,6 +18,8 @@ After generating (``--maps-dir`` and/or ``--orders-dir``): the PDFs have
 one page per order in total and per delivery route, and each page is for
 the right order: each order form page is compared with the form drawn
 for that order, and each map page's title must be that order's address.
+With ``--stop-order`` (from ``route_order.py``), every order must be a
+stop on its own route, and the pages must be in stop order.
 
 The ``BasicOrderStats`` checks are skipped for CSV input, which has only
 one sheet.  Exits with status 1 if any check fails.
@@ -25,7 +27,8 @@ one sheet.  Exits with status 1 if any check fails.
 Usage::
 
     python check_workbook.py --input "Mulch Sales - Fall 2026.xlsx"
-    python check_workbook.py --input "..." --maps-dir output/maps --orders-dir output/orders
+    python check_workbook.py --input "..." --maps-dir output/maps --orders-dir output/orders \
+        --stop-order output/stop_order.json
 """
 
 import argparse
@@ -33,6 +36,7 @@ import collections
 import contextlib
 import glob
 import io
+import json
 import os
 import re
 import sys
@@ -40,7 +44,8 @@ from typing import Dict, List, Optional, Tuple
 
 from addresses import same_street_address
 from generate_maps_pdf import extract_address
-from generate_order_forms import draw_order_form, is_order_row, load_fonts, parse_order_records
+from generate_order_forms import draw_order_form, is_order_row, load_fonts, parse_order_records, route_groups
+from route_order import in_stop_order, load_stop_order, stop_label
 from sheet_reader import read_rows
 
 STATS_SHEET = "BasicOrderStats"
@@ -57,9 +62,10 @@ def load_orders(path: str, sheet: Optional[str] = None) -> Tuple[List[Dict[str, 
     header = [c.strip() for c in rows[header_row_idx]] if rows else []
     orders: List[Dict[str, str]] = []
     totals_bags: Optional[str] = None
-    for values in rows[header_row_idx + 1:]:
-        row = {k: v.strip() for k, v in zip(header, values)}
+    for row_idx in range(header_row_idx + 1, len(rows)):
+        row = {k: v.strip() for k, v in zip(header, rows[row_idx])}
         if is_order_row(row):
+            row["_row"] = row_idx + 1  # the row number in the sheet
             orders.append(row)
         elif "Totals" in row.values() and totals_bags is None:
             totals_bags = row.get("Number of Bags", "") or None
@@ -129,12 +135,17 @@ def check_after(
     sheet: Optional[str] = None,
     maps_dir: Optional[str] = None,
     orders_dir: Optional[str] = None,
+    stop_order: Optional[str] = None,
 ) -> List[str]:
     """Check the generated PDFs have one page per order; return the problems."""
     from PyPDF2 import PdfReader
 
     problems: List[str] = []
     orders, _ = load_orders(path, sheet)
+    stops = None
+    if stop_order:
+        stops = load_stop_order(stop_order)
+        problems += _check_stop_order(stop_order, orders)
     stats = load_stats(path)
     expected_total = int(stats["Orders"]) if stats and stats.get("Orders", "").isdigit() else len(orders)
     for kind, out_dir, rows in (
@@ -151,9 +162,9 @@ def check_after(
         total = sum(actual.values())
         print(f"{kind}: {total} page(s) in {len(actual)} file(s) in {out_dir}")
         if kind == "maps":
-            problems += _check_map_pages(out_dir, rows)
+            problems += _check_map_pages(out_dir, rows, stops)
         else:
-            problems += _check_order_form_pages(out_dir, path, sheet)
+            problems += _check_order_form_pages(out_dir, path, sheet, stops)
         if total != expected_total:
             problems.append(f"{kind}: {total} pages, but there are {expected_total} orders.")
         for name in sorted(set(expected) | set(actual)):
@@ -173,8 +184,32 @@ def _by_route(items, route_of) -> "collections.OrderedDict[str, list]":
     return groups
 
 
-def _check_map_pages(out_dir: str, orders: List[Dict[str, str]]) -> List[str]:
-    """Each map page's title must be the address of the order for that page."""
+def _check_stop_order(stop_order: str, orders: List[Dict[str, str]]) -> List[str]:
+    """Every order must be one stop, on its own route, in the stop order file."""
+    with open(stop_order, encoding="utf-8") as f:
+        routes = json.load(f)["routes"]
+    route_of_row = {int(s["row"]): route for route, stops in routes.items() for s in stops}
+    problems: List[str] = []
+    for o in orders:
+        route = route_of_row.pop(o["_row"], None)
+        if route != o.get("Delivery Route", ""):
+            problems.append(
+                f"stop order: {o.get('Street Address')} ({o.get('Delivery Route')}) is "
+                + (f"a stop on '{route}'." if route is not None else "not a stop on any route.")
+                + " Rerun route_order.py."
+            )
+    for row, route in route_of_row.items():
+        problems.append(f"stop order: row {row} ({route}) is not an order. Rerun route_order.py.")
+    return problems
+
+
+def _check_map_pages(
+    out_dir: str, orders: List[Dict[str, str]], stops: Optional[Dict[int, Tuple[int, int]]] = None
+) -> List[str]:
+    """Each map page's title must be the address of the order for that page.
+
+    With ``stops``, the page must also say that order's "Stop n of N".
+    """
     from PyPDF2 import PdfReader
 
     problems: List[str] = []
@@ -182,15 +217,21 @@ def _check_map_pages(out_dir: str, orders: List[Dict[str, str]]) -> List[str]:
         path = os.path.join(out_dir, name)
         if not os.path.exists(path):
             continue
+        group = in_stop_order(group, lambda o: o["_row"], stops)
         pages = PdfReader(path).pages
         for i, order in enumerate(group[: len(pages)]):
             title = extract_address(order["Map Link"]) or ""
+            # Text extraction splits words oddly ("Stop 1 1 of 14"), so ignore spaces.
             squash = lambda t: re.sub(r"\s+", "", t).lower()
-            if squash(title.split(",")[0]) not in squash(pages[i].extract_text() or ""):
+            text = squash(pages[i].extract_text() or "")
+            if squash(title.split(",")[0]) not in text:
                 problems.append(
                     f"maps: {name} page {i + 1} should be {order.get('Street Address')} "
                     f"('{title}') but isn't."
                 )
+            stop = stop_label(order["_row"], stops)
+            if stop and squash(f"Stop {stop}") not in text:
+                problems.append(f"maps: {name} page {i + 1} doesn't say 'Stop {stop}'.")
     return problems
 
 
@@ -203,7 +244,9 @@ def _page_image(page):
     return Image.open(io.BytesIO(data)).convert("L")
 
 
-def _check_order_form_pages(out_dir: str, path: str, sheet: Optional[str]) -> List[str]:
+def _check_order_form_pages(
+    out_dir: str, path: str, sheet: Optional[str], stops: Optional[Dict[int, Tuple[int, int]]] = None
+) -> List[str]:
     """Each order form page must look like the form drawn for its order."""
     from PIL import ImageChops
     from PyPDF2 import PdfReader
@@ -212,7 +255,8 @@ def _check_order_form_pages(out_dir: str, path: str, sheet: Optional[str]) -> Li
     with contextlib.redirect_stdout(io.StringIO()):  # warnings already shown
         records = parse_order_records(path, sheet)
     fonts = load_fonts()
-    for name, group in _by_route(records, lambda r: r.get("route", "")).items():
+    for route, group in route_groups(records, stops).items():
+        name = route_file(route) + ".pdf"
         pdf = os.path.join(out_dir, name)
         if not os.path.exists(pdf):
             continue
@@ -247,9 +291,10 @@ def main() -> None:
     parser.add_argument("--sheet", help="Customer sheet in an .xlsx input (default: the first sheet).")
     parser.add_argument("--maps-dir", help="Check the generated map PDFs in this directory.")
     parser.add_argument("--orders-dir", help="Check the generated order form PDFs in this directory.")
+    parser.add_argument("--stop-order", help="Stop order file (route_order.py) the PDFs were made with.")
     args = parser.parse_args()
     if args.maps_dir or args.orders_dir:
-        problems = check_after(args.input, args.sheet, args.maps_dir, args.orders_dir)
+        problems = check_after(args.input, args.sheet, args.maps_dir, args.orders_dir, args.stop_order)
     else:
         problems = check_before(args.input, args.sheet)
     sys.exit(1 if problems else 0)

@@ -28,6 +28,7 @@ import addresses  # noqa: E402
 import check_workbook  # noqa: E402
 import generate_maps_pdf as maps  # noqa: E402
 import generate_order_forms as forms  # noqa: E402
+import route_order  # noqa: E402
 
 SEASON_CSV = os.path.join(HERE, "fixtures", "season_export.csv")
 
@@ -163,6 +164,9 @@ class MapRecordTests(unittest.TestCase):
     def test_only_special_comments_become_notes(self):
         self.assertEqual([r[3] for r in self.records], [None, "Need one pallet", None, None])
 
+    def test_sheet_row_numbers(self):
+        self.assertEqual([r[5] for r in self.records], [3, 4, 7, 8])
+
     def test_street_addresses(self):
         self.assertEqual(
             [r[4] for r in self.records],
@@ -178,8 +182,8 @@ class MapRecordTests(unittest.TestCase):
         self.assertEqual(
             maps.read_records(path),
             [
-                ("https://maps.example/1", "Fairfax 15A", "20", None, None),
-                ("https://maps.example/2", "Burke 01", None, None, None),
+                ("https://maps.example/1", "Fairfax 15A", "20", None, None, 1),
+                ("https://maps.example/2", "Burke 01", None, None, None, 2),
             ],
         )
 
@@ -432,6 +436,236 @@ class CheckWorkbookTests(unittest.TestCase):
             problems,
             ["order forms: Fairfax_07.pdf page 2 should be Testerson, Erin, 500 Maple Drive (10 bags) but isn't."],
         )
+
+
+
+def pin_link(street: str, lat: float, lng: float) -> str:
+    """A made-up Google Maps link with a place pin."""
+    return (f"https://www.google.com/maps/place/{street.replace(' ', '+')}/@{lat},{lng},17z"
+            f"/data=!4m6!3m5!1s0x0:0x0!8m2!3d{lat}!4d{lng}!16s")
+
+
+def flat_distances(points):
+    """A distance matrix for made-up points: plain (scaled) Euclidean distance."""
+    return [[1000 * ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for b in points] for a in points]
+
+
+class RouteOrderTests(unittest.TestCase):
+    def test_pin_coordinates(self):
+        self.assertEqual(route_order.pin_coordinates(pin_link("100 Maple Ct", 38.81, -77.31)), (38.81, -77.31))
+        # The map's centre (@) is not the pin.
+        self.assertIsNone(route_order.pin_coordinates(
+            "https://www.google.com/maps/place/100+Maple+Ct/@38.81,-77.31,17z"))
+        self.assertIsNone(route_order.pin_coordinates(""))
+
+    def test_stops_along_a_street_are_driven_from_the_near_end(self):
+        points = [(0, x) for x in (3, 0, 4, 1, 2)]
+        self.assertEqual(route_order.best_order(flat_distances([(0, -1)] + points)), [1, 3, 4, 0, 2])
+        self.assertEqual(route_order.best_order(flat_distances([(0, 5)] + points)), [2, 0, 4, 3, 1])
+
+    def test_one_way_streets(self):
+        # Start 0, stops 1 and 2.  1 -> 2 is short, 2 -> 1 is a long way round.
+        dist = [[0, 5, 5], [5, 0, 1], [5, 9, 0]]
+        self.assertEqual(route_order.best_order(dist), [0, 1])
+        dist = [[0, 5, 5], [5, 0, 9], [5, 1, 0]]
+        self.assertEqual(route_order.best_order(dist), [1, 0])
+
+    def test_shortest_order_matches_trying_every_order(self):
+        import itertools
+        import random
+
+        rnd = random.Random(1865)
+        for n in range(1, 8):
+            # Different each way, like real driving distances.
+            dist = [[0 if a == b else rnd.uniform(1, 10) for b in range(n + 1)] for a in range(n + 1)]
+            order = route_order.best_order(dist)
+            self.assertEqual(sorted(order), list(range(n)))
+            shortest = min(route_order.path_length(dist, p) for p in itertools.permutations(range(n)))
+            self.assertAlmostEqual(route_order.path_length(dist, order), shortest)
+
+    def test_long_routes_get_every_stop_once(self):
+        import random
+
+        rnd = random.Random(7)
+        dist = flat_distances([(rnd.random(), rnd.random()) for _ in range(21)])
+        order = route_order.best_order(dist)
+        self.assertEqual(sorted(order), list(range(20)))
+        self.assertLessEqual(
+            route_order.path_length(dist, order),
+            route_order.path_length(dist, route_order._nearest_neighbour(dist)),
+        )
+
+    def test_plan_routes(self):
+        orders, _ = check_workbook.load_orders(SEASON_CSV)
+        # The fixture's links have no pins; give 500 Maple Drive one, next to the start.
+        pins = {orders[2]["Map Link"]: (38.8100, -77.3129)}
+        routes, warnings = route_order.plan_routes(orders, pins, flat_distances)
+        self.assertEqual({r: [s["row"] for s in stops] for r, stops in routes.items()},
+                         {"Fairfax 07": [7, 3], "Fairfax 01A": [4, 9], "Fairfax 12A": [8]})
+        self.assertIn("700 Birch Way (Fairfax 01A): no location; put last on the route.", warnings)
+        self.assertIn("100 Maple Drive (Fairfax 07): no pin found; used the map's centre instead.", warnings)
+        self.assertLess(routes["Fairfax 07"][0]["km_from_previous"], 0.01)
+
+
+class DrivingMatrixTests(unittest.TestCase):
+    """Driving distances from the Routes API (the API itself is faked)."""
+
+    POINTS = [(38.80, -77.30), (38.81, -77.31), (38.82, -77.32)]
+
+    def fake_api(self, calls):
+        def request(origins, destinations, api_key):
+            calls.append((len(origins), len(destinations)))
+            elements = []
+            for i, o in enumerate(origins):
+                for j, d in enumerate(destinations):
+                    el = {"condition": "ROUTE_EXISTS", "duration": "60s",
+                          "distanceMeters": int(round(abs(o[0] - d[0]) * 100000 + (5 if i > j else 0)))}
+                    # The API leaves out fields that are 0.
+                    if i:
+                        el["originIndex"] = i
+                    if j:
+                        el["destinationIndex"] = j
+                    if el["distanceMeters"] == 0:
+                        del el["distanceMeters"]
+                    elements.append(el)
+            return elements
+        return request
+
+    def test_matrix_and_cache(self):
+        from unittest import mock
+
+        calls, cache = [], {}
+        with mock.patch.object(route_order, "_request_matrix", self.fake_api(calls)):
+            dist = route_order.driving_matrix(self.POINTS, "test-key", cache)
+            self.assertEqual(dist[0][2], 2000.0)
+            self.assertEqual(dist[2][0], 2005.0)  # longer the other way
+            self.assertEqual(dist[1][1], 0.0)
+            self.assertEqual(len(calls), 1)
+            # Everything is cached now: no second request.
+            self.assertEqual(route_order.driving_matrix(self.POINTS, "test-key", cache), dist)
+            self.assertEqual(len(calls), 1)
+
+    def test_large_routes_are_split_into_requests(self):
+        from unittest import mock
+
+        calls = []
+        points = [(38.80 + i / 1000, -77.30) for i in range(30)]
+        with mock.patch.object(route_order, "_request_matrix", self.fake_api(calls)):
+            dist = route_order.driving_matrix(points, "test-key", {})
+        self.assertEqual(sorted(calls), [(5, 5), (5, 25), (25, 5), (25, 25)])
+        self.assertEqual(dist[29][0], 2905.0)
+
+    def test_no_route(self):
+        from unittest import mock
+
+        with mock.patch.object(route_order, "_request_matrix", return_value=[]):
+            with self.assertRaises(route_order.RouteOrderError):
+                route_order.driving_matrix(self.POINTS, "test-key", {})
+
+    def test_refused_key_is_not_shown(self):
+        import urllib.error
+        from unittest import mock
+
+        body = io.BytesIO(b'[{"error": {"code": 400, "message": "API key not valid: secret-key-123"}}]')
+        error = urllib.error.HTTPError(route_order.ROUTES_API_URL, 400, "Bad Request", {}, body)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(route_order.RouteOrderError) as raised:
+                route_order._request_matrix(self.POINTS[:1], self.POINTS[1:], "secret-key-123")
+        self.assertIn("HTTP 400): API key not valid", str(raised.exception))
+        self.assertNotIn("secret-key-123", str(raised.exception))
+
+    def test_request(self):
+        import json
+        from unittest import mock
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'[{"condition": "ROUTE_EXISTS"}]'
+        with mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
+            self.assertEqual(route_order._request_matrix(self.POINTS[:1], self.POINTS[1:], "k"),
+                             [{"condition": "ROUTE_EXISTS"}])
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.get_header("X-goog-api-key"), "k")
+        body = json.loads(request.data)
+        self.assertEqual(body["travelMode"], "DRIVE")
+        self.assertEqual(len(body["origins"]), 1)
+        self.assertEqual(len(body["destinations"]), 2)
+        self.assertEqual(body["origins"][0]["waypoint"]["location"]["latLng"], {"latitude": 38.80, "longitude": -77.30})
+
+
+def write_stop_order(path: str, routes) -> None:
+    import json
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"routes": {r: [{"row": row} for row in rows] for r, rows in routes.items()}}, f)
+
+
+class StopOrderOutputTests(unittest.TestCase):
+    """Pages are printed in stop order and the checks follow it."""
+
+    # Fairfax 07 reversed: 500 Maple Drive (row 7) first.
+    ROUTES = {"Fairfax 07": [7, 3], "Fairfax 01A": [4, 9], "Fairfax 12A": [8]}
+
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.xlsx = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        build_season_workbook(cls.xlsx)
+        fd, cls.stop_file = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        write_stop_order(cls.stop_file, cls.ROUTES)
+        cls.stops = route_order.load_stop_order(cls.stop_file)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.remove(cls.xlsx)
+        os.remove(cls.stop_file)
+
+    def test_load_stop_order(self):
+        self.assertEqual(self.stops, {7: (1, 2), 3: (2, 2), 4: (1, 2), 9: (2, 2), 8: (1, 1)})
+
+    def test_order_forms_in_stop_order(self):
+        records, _ = quiet(forms.parse_order_records, self.xlsx)
+        groups = forms.route_groups(records, self.stops)
+        self.assertEqual([(r["address"], r["stop"]) for r in groups["Fairfax 07"]],
+                         [("500 Maple Drive", "1 of 2"), ("100 Maple Drive", "2 of 2")])
+        # Without a stop order: sheet order, no stop numbers.
+        groups = forms.route_groups(records)
+        self.assertEqual([(r["address"], r["stop"]) for r in groups["Fairfax 07"]],
+                         [("100 Maple Drive", None), ("500 Maple Drive", None)])
+
+    def test_maps_in_stop_order(self):
+        group = maps.group_by_label(maps.read_records(self.xlsx))["Fairfax 07"]
+        ordered = route_order.in_stop_order(group, lambda rec: rec[5], self.stops)
+        self.assertEqual([rec[4] for rec in ordered], ["500 Maple Drive", "100 Maple Drive"])
+        self.assertEqual([route_order.stop_label(rec[5], self.stops) for rec in ordered], ["1 of 2", "2 of 2"])
+
+    def test_after_generating_in_stop_order(self):
+        records, _ = quiet(forms.parse_order_records, self.xlsx)
+        with tempfile.TemporaryDirectory() as out_dir:
+            quiet(forms.save_order_forms, records, out_dir, self.stops)
+            problems, _ = quiet(check_workbook.check_after, self.xlsx, None, None, out_dir, self.stop_file)
+        self.assertEqual(problems, [])
+
+    def test_after_generating_catches_pages_not_in_stop_order(self):
+        records, _ = quiet(forms.parse_order_records, self.xlsx)
+        with tempfile.TemporaryDirectory() as out_dir:
+            quiet(forms.save_order_forms, records, out_dir)  # sheet order
+            problems, _ = quiet(check_workbook.check_after, self.xlsx, None, None, out_dir, self.stop_file)
+        self.assertIn(
+            "order forms: Fairfax_07.pdf page 1 should be Testerson, Erin, 500 Maple Drive (10 bags) but isn't.",
+            problems,
+        )
+
+    def test_stop_order_must_cover_every_order(self):
+        orders, _ = check_workbook.load_orders(self.xlsx)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "stop_order.json")
+            write_stop_order(path, {"Fairfax 07": [7, 3, 5], "Fairfax 01A": [4], "Fairfax 12A": [9, 8]})
+            problems = check_workbook._check_stop_order(path, orders)
+        self.assertEqual(problems, [
+            "stop order: 700 Birch Way (Fairfax 01A) is a stop on 'Fairfax 12A'. Rerun route_order.py.",
+            "stop order: row 5 (Fairfax 07) is not an order. Rerun route_order.py.",
+        ])
 
 
 if __name__ == "__main__":
