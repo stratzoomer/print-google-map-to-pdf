@@ -592,6 +592,57 @@ class DrivingMatrixTests(unittest.TestCase):
         self.assertEqual(body["origins"][0]["waypoint"]["location"]["latLng"], {"latitude": 38.80, "longitude": -77.30})
 
 
+class RouteSuggestionTests(unittest.TestCase):
+    """Small routes that might be folded into an adjacent route."""
+
+    @staticmethod
+    def order(route, street, bags, lat, lng):
+        return {"Delivery Route": route, "Street Address": street, "Number of Bags": str(bags),
+                "Map Link": pin_link(street, lat, lng)}
+
+    def test_small_route_lists_its_family_and_closest_route(self):
+        orders = [
+            self.order("Fairfax 01A", "100 Maple Ct", 5, 38.810, -77.310),
+            self.order("Fairfax 01B", "200 Oak Ct", 20, 38.811, -77.310),
+            self.order("Fairfax 01B", "210 Oak Ct", 20, 38.812, -77.310),
+            self.order("Fairfax 01B", "220 Oak Ct", 20, 38.813, -77.310),
+            self.order("Fairfax 02", "300 Elm St", 30, 38.900, -77.310),
+            self.order("Fairfax 02", "310 Elm St", 30, 38.901, -77.310),
+            self.order("Fairfax 02", "320 Elm St", 30, 38.902, -77.310),
+        ]
+        self.assertEqual(check_workbook.route_suggestions(orders), [
+            "Fairfax 01A has 1 order(s), 5 bags (100 Maple Ct). "
+            "Same area: Fairfax 01B (3 order(s), 60 bags). "
+            "Closest route: Fairfax 01B (3 order(s), 60 bags), 0.1 km away."
+        ])
+
+    def test_big_orders_and_the_outlier_route_are_not_suggested(self):
+        orders = [
+            self.order("Fairfax 15A", "500 Birch Rd", 50, 38.80, -77.30),  # one big order
+            self.order("Outlier", "600 Far Rd", 5, 38.90, -77.40),
+            self.order("Burke 01", "700 Pine Ct", 10, 38.80, -77.29),
+            self.order("Burke 01", "710 Pine Ct", 10, 38.80, -77.29),
+            self.order("Burke 01", "720 Pine Ct", 10, 38.80, -77.29),
+        ]
+        self.assertEqual(check_workbook.route_suggestions(orders), [])
+
+    def test_never_suggests_the_outlier_route(self):
+        orders = [
+            self.order("Burke 02", "800 Ash Ct", 5, 38.800, -77.300),
+            self.order("Outlier", "810 Ash Ct", 5, 38.800, -77.300),
+            self.order("Burke 03", "900 Fir Ct", 10, 38.810, -77.300),
+            self.order("Burke 03", "910 Fir Ct", 10, 38.810, -77.300),
+            self.order("Burke 03", "920 Fir Ct", 10, 38.810, -77.300),
+        ]
+        [suggestion] = check_workbook.route_suggestions(orders)
+        self.assertIn("Closest route: Burke 03", suggestion)
+
+    def test_route_family(self):
+        self.assertEqual(check_workbook._route_family("Fairfax 01A"), "Fairfax 01")
+        self.assertEqual(check_workbook._route_family("Fairfax 01"), "Fairfax 01")
+        self.assertEqual(check_workbook._route_family("Fairfax Station 12"), "Fairfax Station 12")
+
+
 def write_stop_order(path: str, routes) -> None:
     import json
 

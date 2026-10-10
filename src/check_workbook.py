@@ -14,6 +14,9 @@ Before generating (``--input`` only):
    every order has a ``Map Link`` (so there will be one map per order).
 3. Each order's ``Map Link`` is for its ``Street Address``.
 
+It also lists small routes (``route_suggestions``) that might be folded
+into an adjacent route.  Those are suggestions for the user, not problems.
+
 After generating (``--maps-dir`` and/or ``--orders-dir``): the PDFs have
 one page per order in total and per delivery route, and each page is for
 the right order: each order form page is compared with the form drawn
@@ -37,18 +40,26 @@ import contextlib
 import glob
 import io
 import json
+import math
 import os
 import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
 from addresses import same_street_address
-from generate_maps_pdf import extract_address
+from generate_maps_pdf import extract_address, extract_coordinates
 from generate_order_forms import draw_order_form, is_order_row, load_fonts, parse_order_records, route_groups
-from route_order import in_stop_order, load_stop_order, stop_label
+from route_order import in_stop_order, load_stop_order, pin_coordinates, stop_label
 from sheet_reader import read_rows
 
 STATS_SHEET = "BasicOrderStats"
+
+# A route with at most this many orders and bags may be worth folding into an
+# adjacent route.  Larger orders may need a truck to themselves.
+SMALL_ROUTE_MAX_ORDERS = 2
+SMALL_ROUTE_MAX_BAGS = 40
+# Orders far from the rest go on this route; never suggest folding into it.
+OUTLIER_ROUTE = "Outlier"
 
 
 def load_orders(path: str, sheet: Optional[str] = None) -> Tuple[List[Dict[str, str]], Optional[str]]:
@@ -127,7 +138,66 @@ def check_before(path: str, sheet: Optional[str] = None) -> List[str]:
             )
 
     _report("Before generating", problems)
+
+    suggestions = route_suggestions(orders)
+    if suggestions:
+        print(f"Routes to consider folding into an adjacent route ({len(suggestions)}; not errors):")
+        for s in suggestions:
+            print(f"  - {s}")
     return problems
+
+
+def _route_family(route: str) -> str:
+    """``"Fairfax 01"`` for ``"Fairfax 01A"``, ``"Fairfax 01B"`` and ``"Fairfax 01"``."""
+    return re.sub(r"(?<=\d)[A-Za-z]+$", "", route.strip())
+
+
+def _straight_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    lat1, lng1, lat2, lng2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lng2 - lng1) / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(h))
+
+
+def route_suggestions(orders: List[Dict[str, str]]) -> List[str]:
+    """Small routes that might be folded into an adjacent route.
+
+    A route is small with at most ``SMALL_ROUTE_MAX_ORDERS`` orders and
+    ``SMALL_ROUTE_MAX_BAGS`` bags.  For each, list the routes of the same
+    family (Fairfax 01A/01B/01C) and the closest other route (straight line
+    between their nearest stops, from the map links' pins).
+    """
+    routes: "collections.OrderedDict[str, List[Dict[str, str]]]" = collections.OrderedDict()
+    for o in orders:
+        routes.setdefault(o.get("Delivery Route", ""), []).append(o)
+
+    def where(o: Dict[str, str]) -> Optional[Tuple[float, float]]:
+        link = o.get("Map Link", "")
+        return pin_coordinates(link) or extract_coordinates(link)
+
+    def size(route: str) -> str:
+        group = routes[route]
+        return f"{len(group)} order(s), {sum(int(o['Number of Bags']) for o in group)} bags"
+
+    located = {r: [p for p in map(where, group) if p] for r, group in routes.items()}
+    suggestions: List[str] = []
+    for route, group in sorted(routes.items()):
+        bags = sum(int(o["Number of Bags"]) for o in group)
+        if route == OUTLIER_ROUTE or len(group) > SMALL_ROUTE_MAX_ORDERS or bags > SMALL_ROUTE_MAX_BAGS:
+            continue
+        parts = [f"{route} has {size(route)} ({', '.join(o.get('Street Address', '') for o in group)})."]
+        family = [r for r in sorted(routes) if r != route and _route_family(r) == _route_family(route)]
+        if family:
+            parts.append("Same area: " + "; ".join(f"{r} ({size(r)})" for r in family) + ".")
+        distances = [
+            (min(_straight_km(a, b) for a in located[route] for b in located[r]), r)
+            for r in routes
+            if r not in (route, OUTLIER_ROUTE) and located[r] and located[route]
+        ]
+        if distances:
+            km, closest = min(distances)
+            parts.append(f"Closest route: {closest} ({size(closest)}), {km:.1f} km away.")
+        suggestions.append(" ".join(parts))
+    return suggestions
 
 
 def check_after(

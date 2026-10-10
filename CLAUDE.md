@@ -77,6 +77,15 @@ for the API key). It runs
 3. Each `Map Link` is for the order's `Street Address` (column H).
 4. Sometimes the delivery instructions can be incorrectly in the `Comment` field, as opposed to the `Delivery Instructions`. Report any that is found to the user.
 
+The same check also lists **small routes** (at most 2 orders and 40 bags,
+`SMALL_ROUTE_MAX_*` in `src/check_workbook.py`) with the routes of the same
+family (e.g. Fairfax 01A and 01B) and the closest route. These are
+suggestions, not errors; they don't stop the run. Before generating, show
+them to the user, when asking for the API key, and ask whether they want to
+fold any routes first. If they do, they change `Delivery Route` in the
+spreadsheet and ask for a regeneration. Never suggest folding into
+`Outlier`.
+
 While printing, the maps script also compares the place Google Maps actually
 loaded with `Street Address` for every map (`MAP CHECK` summary at the end).
 After generating, the wrapper checks both `output/maps/` and
