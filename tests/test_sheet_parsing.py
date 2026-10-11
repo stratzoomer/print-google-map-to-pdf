@@ -255,6 +255,14 @@ def build_season_workbook(path: str) -> None:
     stats.append(["Total Bags", 81])
     stats.append(["Orders", 5])
     stats.append(["Average Order", 16.2])
+    by_route = wb.create_sheet("OrderDataByDeliveryRoute")
+    by_route.append([])
+    by_route.append(["Neighborhood", "Delivery Route", "Orders", "Bags", "Average"])
+    by_route.append(["Grand Totals/Averages", "Grand Totals/Averages", 5, 81, 16.2])
+    by_route.append(["Hood", "Fairfax 01A", 2, 11, 5.5])
+    by_route.append(["Hood", "Fairfax 07", 2, 30, 15])
+    by_route.append(["Hood", "Fairfax 12A", 1, 40, 40])
+    by_route.append(["Hood", "Fairfax 13", 0, 0, 0])
     wb.save(path)
 
 
@@ -399,6 +407,39 @@ class CheckWorkbookTests(unittest.TestCase):
         problems = self.check_before(self.edited_workbook(edit))
         self.assertIn("BasicOrderStats 'Total Bags' is 90, but the orders add up to 81.", problems)
         self.assertIn("BasicOrderStats 'Orders' is 6, but there are 5 orders.", problems)
+
+    def test_route_stats(self):
+        self.assertEqual(check_workbook.load_route_stats(self.xlsx), {
+            "Fairfax 01A": ("2", "11"), "Fairfax 07": ("2", "30"),
+            "Fairfax 12A": ("1", "40"), "Fairfax 13": ("0", "0"),
+        })
+        self.assertIsNone(check_workbook.load_route_stats(SEASON_CSV))
+
+    def test_missing_conditional_route_formula(self):
+        # Like a row whose column M formula was deleted: the per-route
+        # order count no longer includes it.
+        def edit(wb):
+            ws = wb["Customers"]
+            for r in range(3, ws.max_row + 1):
+                if ws.cell(r, 4).value == "Mailer":
+                    ws.cell(r, 13).value = None
+            wb["OrderDataByDeliveryRoute"]["C4"] = 1
+        problems = self.check_before(self.edited_workbook(edit))
+        self.assertIn(
+            "200 Oak Court (Fairfax 01A), row 4: Conditional Delivery route (column M) is ''; "
+            "copy its formula from the row above.",
+            problems,
+        )
+        self.assertIn(
+            "OrderDataByDeliveryRoute 'Fairfax 01A' has 1 orders, 11 bags, but there are 2 orders, 11 bags.",
+            problems,
+        )
+
+    def test_route_missing_from_route_stats(self):
+        def edit(wb):
+            wb["OrderDataByDeliveryRoute"].delete_rows(6)  # Fairfax 12A
+        problems = self.check_before(self.edited_workbook(edit))
+        self.assertIn("OrderDataByDeliveryRoute has no row for 'Fairfax 12A' (1 orders, 40 bags).", problems)
 
     def test_map_link_for_another_address(self):
         def edit(wb):

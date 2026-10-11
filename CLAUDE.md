@@ -75,7 +75,14 @@ for the API key). It runs
 2. The number of orders = `Orders` (column B) on `BasicOrderStats`, and every
    order has a `Map Link`.
 3. Each `Map Link` is for the order's `Street Address` (column H).
-4. Sometimes the delivery instructions can be incorrectly in the `Comment` field, as opposed to the `Delivery Instructions`. Report any that is found to the user.
+4. Each order's `Conditional Delivery route` (column M, formula
+   `=IF(Q>0,L,"")`) equals its `Delivery Route` (column L). The per-route
+   order counts on `OrderDataByDeliveryRoute` count column M, so a row
+   missing that formula drops out of its route's count. The season totals
+   don't change, so checks 1–2 can't catch it.
+5. Each route's `Orders` and `Bags` on `OrderDataByDeliveryRoute` match the
+   orders on `Customers`.
+6. Sometimes the delivery instructions can be incorrectly in the `Comment` field, as opposed to the `Delivery Instructions`. Report any that is found to the user.
 
 The same check also lists **small routes** (at most 2 orders and 40 bags,
 `SMALL_ROUTE_MAX_*` in `src/check_workbook.py`) with the routes of the same

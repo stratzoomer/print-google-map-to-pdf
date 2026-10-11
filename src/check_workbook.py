@@ -13,6 +13,12 @@ Before generating (``--input`` only):
 2. The number of orders matches ``Orders`` on ``BasicOrderStats``, and
    every order has a ``Map Link`` (so there will be one map per order).
 3. Each order's ``Map Link`` is for its ``Street Address``.
+4. Each order's ``Conditional Delivery route`` (column M) is its
+   ``Delivery Route`` (column L).  ``OrderDataByDeliveryRoute`` counts a
+   route's orders by column M, so a row missing that formula drops out of
+   the count.
+5. The orders and bags of every route on ``OrderDataByDeliveryRoute`` match
+   the orders.
 
 It also lists small routes (``route_suggestions``) that might be folded
 into an adjacent route.  Those are suggestions for the user, not problems.
@@ -53,6 +59,7 @@ from route_order import in_stop_order, load_stop_order, pin_coordinates, stop_la
 from sheet_reader import read_rows
 
 STATS_SHEET = "BasicOrderStats"
+ROUTE_STATS_SHEET = "OrderDataByDeliveryRoute"
 
 # A route with at most this many orders and bags may be worth folding into an
 # adjacent route.  Larger orders may need a truck to themselves.
@@ -94,13 +101,36 @@ def load_stats(path: str) -> Optional[Dict[str, str]]:
     return {r[0].strip(): r[1].strip() for r in rows if len(r) > 1 and r[0].strip()}
 
 
+def load_route_stats(path: str) -> Optional[Dict[str, Tuple[str, str]]]:
+    """Return ``OrderDataByDeliveryRoute`` as {route: (orders, bags)}, or None."""
+    if not path.lower().endswith((".xlsx", ".xlsm")):
+        return None
+    try:
+        rows, _ = read_rows(path, ROUTE_STATS_SHEET)
+    except KeyError:
+        return None
+    header: Optional[List[str]] = None
+    stats: Dict[str, Tuple[str, str]] = {}
+    for row in rows:
+        cells = [c.strip() for c in row]
+        if header is None:
+            if {"Delivery Route", "Orders", "Bags"} <= set(cells):
+                header = cells
+            continue
+        values = dict(zip(header, cells))
+        route = values.get("Delivery Route", "")
+        if route and not route.startswith("Grand Total"):
+            stats[route] = (values.get("Orders", ""), values.get("Bags", ""))
+    return stats if header else None
+
+
 def route_file(route: str) -> str:
     """The PDF name both scripts use for a delivery route."""
     return (re.sub(r"[^A-Za-z0-9]+", "_", route.strip()) or "orders") if route else "orders"
 
 
 def check_before(path: str, sheet: Optional[str] = None) -> List[str]:
-    """Run checks 1-3 on the workbook; print a report and return the problems."""
+    """Run checks 1-5 on the workbook; print a report and return the problems."""
     problems: List[str] = []
     orders, totals_bags = load_orders(path, sheet)
     stats = load_stats(path)
@@ -136,6 +166,34 @@ def check_before(path: str, sheet: Optional[str] = None) -> List[str]:
                 f"{o.get('Street Address')} ({o.get('Delivery Route')}): "
                 f"Map Link is for '{link_address}'."
             )
+
+    # 4. Column M (counted per route) is the delivery route
+    for o in orders:
+        if "Conditional Delivery route" in o and o["Conditional Delivery route"] != o.get("Delivery Route", ""):
+            problems.append(
+                f"{o.get('Street Address')} ({o.get('Delivery Route')}), row {o['_row']}: "
+                f"Conditional Delivery route (column M) is '{o['Conditional Delivery route']}'; "
+                "copy its formula from the row above."
+            )
+
+    # 5. Orders and bags per route
+    route_stats = load_route_stats(path)
+    if route_stats is not None:
+        actual: Dict[str, List[int]] = {}
+        for o in orders:
+            counts = actual.setdefault(o.get("Delivery Route", ""), [0, 0])
+            counts[0] += 1
+            counts[1] += int(o["Number of Bags"])
+        for route in sorted(set(actual) | set(route_stats)):
+            n, b = actual.get(route, [0, 0])
+            sheet_n, sheet_b = route_stats.get(route, ("0", "0"))
+            if route not in route_stats:
+                problems.append(f"{ROUTE_STATS_SHEET} has no row for '{route}' ({n} orders, {b} bags).")
+            elif (sheet_n, sheet_b) != (str(n), str(b)):
+                problems.append(
+                    f"{ROUTE_STATS_SHEET} '{route}' has {sheet_n} orders, {sheet_b} bags, "
+                    f"but there are {n} orders, {b} bags."
+                )
 
     _report("Before generating", problems)
 
