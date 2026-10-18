@@ -482,6 +482,9 @@ def driver_stats(trips: Sequence[Trip]) -> List[Dict]:
             "stops": sum(t.stops for t in driver_trips),
             "bags": sum(t.bags for t in driver_trips),
             "minutes": minutes,
+            # All their trips' round trips; unknown if any trip has no stop order.
+            "miles": (round(sum(t.miles for t in driver_trips), 2)
+                      if all(t.miles is not None for t in driver_trips) else None),
             "bags_per_min": round_down(timed_bags / minutes) if minutes else None,
             "stops_per_hour": round_down(timed_stops * 60 / minutes) if minutes else None,
             "min_per_stop": round_down(minutes / timed_stops) if timed_stops else None,
@@ -609,7 +612,7 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
 def write_csv(directory: str, trips: List[Trip], drivers: List[Dict]) -> None:
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, "drivers.csv"), "w", newline="", encoding="utf-8") as f:
-        fields = ["driver", "routes", "trips", "timed_trips", "stops", "bags", "minutes", "bags_per_min",
+        fields = ["driver", "routes", "trips", "timed_trips", "stops", "bags", "minutes", "miles", "bags_per_min",
                   "stops_per_hour", "min_per_stop", "pace", "max_bags_trip", "max_stops_trip", "first_out",
                   "last_in", "reload_min"]
         w = csv.DictWriter(f, fieldnames=fields)

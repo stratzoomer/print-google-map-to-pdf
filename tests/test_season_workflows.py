@@ -509,16 +509,21 @@ class AfterDeliveryTests(unittest.TestCase):
     def test_without_a_stop_order_miles_are_left_out(self):
         self.assertFalse(self.model["uses_miles"])
         self.assertTrue(all(t.miles is None for t in self.trips))
+        self.assertTrue(all(d["miles"] is None for d in self.drivers.values()))
 
     def test_miles_from_the_stop_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             stop_file = os.path.join(tmp, "stop_order.json")
             plan_season(SEASON, stop_file)
-            (trips, _, model, _), _ = quiet(analyze_deliveries.analyze, SEASON, stop_file)
+            (trips, drivers, model, _), _ = quiet(analyze_deliveries.analyze, SEASON, stop_file)
         self.assertTrue(model["uses_miles"])
         self.assertEqual(model["trips"], 26)
         self.assertEqual(model["estimated_legs"], model["legs"])  # no Google distances here
         self.assertTrue(all(t.miles is not None and t.miles > 0 for t in trips))
+        # Each driver's miles are their trips' miles.
+        for d in drivers:
+            mine = [t for t in trips if d["driver"] in t.drivers]
+            self.assertAlmostEqual(d["miles"], sum(t.miles for t in mine), places=2)
         timed = [t for t in trips if t.minutes is not None]
         self.assertTrue(all(t.expected is not None for t in timed))
 
@@ -537,6 +542,8 @@ class AfterDeliveryTests(unittest.TestCase):
             with open(os.path.join(tmp, "trips.csv"), newline="") as f:
                 trips = list(csv.DictReader(f))
         self.assertEqual(len(rows), 9)
+        self.assertIn("miles", rows[0])
+        self.assertEqual(rows[0]["miles"], "")  # no stop order here
         self.assertEqual(sum(int(t["bags"]) for t in trips), BAGS)
 
 
