@@ -31,6 +31,13 @@ Key files
   `output/stop_order.json`, and both scripts print pages in that order
   (`--stop-order`), numbered "Stop n of N". Without a key (or with
   `--no-route-order`), pages stay in spreadsheet order.
+- `src/analyze_deliveries.py` — after the delivery day: per driver, the
+  stops, bags, bags and stops per minute, biggest load and pace (compared
+  with the typical time for trips of that size), from the driver log
+  (`Driver(s):`, `Time Out`, `Time In`) on `OrderDataByDeliveryRoute`.
+  First checks that every route with bags has a `Time Out` and a later
+  `Time In`, and stops if not (`--skip-checks` to report anyway). Run it with
+  `.venv/bin/python src/analyze_deliveries.py --input "input/..." --csv-dir output/delivery_analysis`.
 - `src/sheet_reader.py` — reads the season workbook (`.xlsx`) or a CSV
   export for both scripts, including which `Comment` text is red.
 - `run_generate_maps_pdf.sh` — convenience wrapper. Runs maps and/or order

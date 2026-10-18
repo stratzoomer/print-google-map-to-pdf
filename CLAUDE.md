@@ -8,6 +8,16 @@ Tests: `python3 -m unittest discover tests` (in `.venv`). The fixture
 format (the `.xlsx` tests build a workbook from it). Never copy real rows
 from `input/` into it (customer names/emails).
 
+`tests/test_season_workflows.py` runs every workflow (checks, stop order,
+order forms, map page checks, the wrapper, the driver log analysis) on
+`tests/fixtures/season_anonymized.xlsx`, an anonymized copy of the Fall
+2026 workbook made by `tests/fixtures/anonymize_workbook.py` (made-up
+names, addresses, locations, comments, instructions and drivers; it refuses
+to save if a real value is left). That's the only way real data may go into
+a fixture, and the repo is public: after regenerating it, check the copy
+yourself before committing it. Regenerating it changes the expected numbers
+in the tests.
+
 ## Input: the season workbook
 
 - The input is the season's Excel workbook, kept in Dropbox and copied
@@ -120,3 +130,19 @@ Report any failures to the user with the rows involved.
   them. They must be filled in before the final print. `generate_order_forms.py`
   prints a WARNING for any order whose instructions are still "TBD".
 - Every order needs a `Map Link`, otherwise it gets no map page (also warned).
+
+## After the delivery day
+
+The drivers log each route on `OrderDataByDeliveryRoute`: `Driver(s):`,
+`Time Out` (left the Sideburn Run lot) and `Time In` (back). Analyze it with
+`.venv/bin/python src/analyze_deliveries.py --input "<workbook>" --csv-dir output/delivery_analysis`.
+It first checks that every route with bags has a `Time Out` and a `Time In`,
+and that the `Time In` is later than the `Time Out`. If not, it lists those
+rows and stops (exit 1): report them to the user to fix in the workbook
+(don't reach for `--skip-checks` without asking). Routes one driver took
+out at the same `Time Out` are one trip. A driver's routes that overlap
+(one leaves before the trip is back) are expected, not a problem: drivers
+add a route to a trip on the way for a more efficient delivery, so it's
+one trip from the first `Time Out` to the last `Time In`. Report any other
+log problems it lists with the rankings, since they change the per-minute
+numbers.
