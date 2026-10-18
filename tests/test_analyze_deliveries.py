@@ -17,6 +17,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
 import analyze_deliveries as ad  # noqa: E402
+import route_order  # noqa: E402
 from test_sheet_parsing import build_season_workbook, quiet  # noqa: E402
 
 T = datetime.time
@@ -63,7 +64,7 @@ class AnalyzeDeliveriesTests(unittest.TestCase):
         ann, bo = drivers["Ann"], drivers["Bo"]
         self.assertEqual((ann["trips"], ann["stops"], ann["bags"], ann["minutes"]), (2, 4, 41, 90))
         self.assertEqual(ann["bags_per_min"], 0.45)  # 0.4555...
-        self.assertEqual(ann["stops_per_min"], 0.04)  # 0.0444...
+        self.assertEqual(ann["stops_per_hour"], 2.66)  # 4 stops in 90 min = 2.666...
         self.assertEqual(ann["min_per_stop"], 22.5)
         self.assertEqual(ann["reload_min"], 10)
         self.assertEqual((bo["bags"], bo["minutes"], bo["max_bags_trip"]), (40, 20, 40))
@@ -192,6 +193,36 @@ class HelperTests(unittest.TestCase):
     def test_split_drivers(self):
         self.assertEqual(ad.split_drivers("Ann / Bo & Cy and Di"), ("Ann", "Bo", "Cy", "Di"))
         self.assertEqual(ad.split_drivers(""), ())
+
+    def test_fit_with_miles(self):
+        trips = []
+        for stops, bags, miles in [(2, 20, 3), (5, 40, 9), (4, 100, 4), (8, 90, 12), (3, 60, 30), (6, 150, 7), (5, 50, 15)]:
+            t = ad.Trip(("Ann",), 0)
+            t.stops, t.bags, t.miles = stops, bags, miles
+            t.time_in = 10 + 3 * stops + 0.5 * bags + 2 * miles
+            trips.append(t)
+        model = ad.fit_trip_minutes(trips)
+        self.assertTrue(model["uses_miles"])
+        for term, value in (("base", 10), ("per_stop", 3), ("per_bag", 0.5), ("per_mile", 2)):
+            self.assertAlmostEqual(model[term], value, places=6, msg=term)
+        self.assertAlmostEqual(ad.expected_minutes(model, 6, 100, 5), 10 + 18 + 50 + 10)
+        # A trip without miles: they are left out for all.
+        trips[0].miles = None
+        self.assertFalse(ad.fit_trip_minutes(trips)["uses_miles"])
+
+    def test_trip_miles(self):
+        start, a, b = route_order.START, (38.82, -77.31), (38.83, -77.31)
+        key = route_order._cache_key
+        trip = ad.Trip(("Ann",), 480)
+        trip.legs = [(480, ["Route A"], 1, 10), (540, ["Route B"], 1, 10)]  # Route B added on the way
+        stops = {"Route A": [a], "Route B": [b]}
+        known = {key(start, a): {"m": 1609.344, "s": 60}, key(b, start): {"m": 3218.688, "s": 120}}
+        miles, legs, estimated = ad.trip_miles(trip, stops, known)
+        # Lot -> A (1 mile), A -> B (estimated: straight line x DETOUR), B -> lot (2 miles).
+        a_to_b = ad._straight_metres(a, b) * ad.DETOUR / ad.METRES_PER_MILE
+        self.assertAlmostEqual(miles, 3 + a_to_b)
+        self.assertEqual((legs, estimated), (3, 1))
+        self.assertEqual(ad.trip_miles(trip, {"Route A": [a]}, known), (None, 0, 0))
 
     def test_fit_recovers_exact_model(self):
         trips = []

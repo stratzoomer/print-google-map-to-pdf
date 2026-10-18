@@ -32,7 +32,7 @@ Key files
   (`--stop-order`), numbered "Stop n of N". Without a key (or with
   `--no-route-order`), pages stay in spreadsheet order.
 - `src/analyze_deliveries.py` — after the delivery day: per driver, the
-  stops, bags, bags and stops per minute, biggest load and pace (compared
+  stops, bags, bags per minute, stops per hour, biggest load and pace (compared
   with the typical time for trips of that size), from the driver log
   (`Driver(s):`, `Time Out`, `Time In`) on `OrderDataByDeliveryRoute`.
   First checks that every route with bags has a `Time Out` and a later

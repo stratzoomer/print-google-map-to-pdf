@@ -482,7 +482,7 @@ class AfterDeliveryTests(unittest.TestCase):
         self.assertEqual(len(problems), 5)
         self.assertIn("Burke 04: Time In 8:25 is before Time Out 9:05", problems[0])
         self.assertIn("Fairfax 12B: only a Time In (7:30)", problems[1])
-        self.assertEqual(sum("left out of the per-minute numbers" in p for p in problems), 2)
+        self.assertEqual(sum("left out of the rates" in p for p in problems), 2)
 
     def test_totals(self):
         self.assertEqual(sum(t.bags for t in self.trips), BAGS)
@@ -496,15 +496,31 @@ class AfterDeliveryTests(unittest.TestCase):
         self.assertEqual(self.drivers[top[0]]["bags"], 473)
         self.assertEqual(leader("bags_per_min"), top)
         self.assertEqual(leader("stops"), top)
-        self.assertEqual(leader("stops_per_min"), top)
+        self.assertEqual(leader("stops_per_hour"), top)
         self.assertEqual(self.drivers[top[0]]["bags_per_min"], 1.6)  # 473 / 295 = 1.603...
-        self.assertEqual(self.drivers[top[0]]["stops_per_min"], 0.1)  # 30 / 295 = 0.1016...
+        self.assertEqual(self.drivers[top[0]]["stops_per_hour"], 6.1)  # 30 * 60 / 295 = 6.101...
         self.assertEqual(self.drivers[top[0]]["minutes"], 295)
 
     def test_trip_model(self):
         self.assertEqual(self.model["trips"], 26)
         self.assertGreater(self.model["per_stop"], 0)
         self.assertGreater(self.model["per_bag"], 0)
+
+    def test_without_a_stop_order_miles_are_left_out(self):
+        self.assertFalse(self.model["uses_miles"])
+        self.assertTrue(all(t.miles is None for t in self.trips))
+
+    def test_miles_from_the_stop_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stop_file = os.path.join(tmp, "stop_order.json")
+            plan_season(SEASON, stop_file)
+            (trips, _, model, _), _ = quiet(analyze_deliveries.analyze, SEASON, stop_file)
+        self.assertTrue(model["uses_miles"])
+        self.assertEqual(model["trips"], 26)
+        self.assertEqual(model["estimated_legs"], model["legs"])  # no Google distances here
+        self.assertTrue(all(t.miles is not None and t.miles > 0 for t in trips))
+        timed = [t for t in trips if t.minutes is not None]
+        self.assertTrue(all(t.expected is not None for t in timed))
 
     def test_report_and_csv(self):
         drivers = list(self.drivers.values())

@@ -136,6 +136,10 @@ Report any failures to the user with the rows involved.
 The drivers log each route on `OrderDataByDeliveryRoute`: `Driver(s):`,
 `Time Out` (left the Sideburn Run lot) and `Time In` (back). Analyze it with
 `.venv/bin/python src/analyze_deliveries.py --input "<workbook>" --csv-dir output/delivery_analysis`.
+The miles of each trip (round trip from the lot) come from the season's
+`output/stop_order.json` and `output/driving_distances.json`; without them
+the typical trip time leaves the miles out, and far routes like `Outlier`
+look slow.
 It first checks that every route with bags has a `Time Out` and a `Time In`,
 and that the `Time In` is later than the `Time Out`. If not, it lists those
 rows and stops (exit 1): report them to the user to fix in the workbook

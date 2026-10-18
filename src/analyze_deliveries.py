@@ -24,11 +24,17 @@ The report lists:
 - problems in the driver log (missing times, ``Time In`` before ``Time
   Out``, routes with orders but no driver); fix them in the workbook and
   run again,
-- per driver: stops, bags, minutes out, bags and stops per minute, the
+- per driver: stops, bags, minutes out, bags per minute, stops per hour, the
   biggest load, and the pace compared with what's typical for trips of
-  that size (a fitted ``minutes = a + b*stops + c*bags``),
-- per trip: routes, stops, bags, miles (from ``stop_order.json``),
-  minutes, expected minutes.
+  that size (see below),
+- per trip: routes, stops, bags, miles, minutes, expected minutes.
+
+The typical time for a trip is fitted on all the timed trips:
+``minutes = a + b*stops + c*bags + d*miles``.  The miles are the round
+trip from the lot through every stop in stop order, from the stop order
+and Google's driving distances that ``route_order.py`` saved
+(``output/stop_order.json``, ``output/driving_distances.json``).  Without
+them, the miles are left out.
 
 Per-minute numbers only count trips with both times; a driver's minutes
 are the time they were out.  A route that leaves before the driver's trip
@@ -50,19 +56,24 @@ import csv
 import datetime
 import decimal
 import json
+import math
 import os
 import re
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from check_workbook import ROUTE_STATS_SHEET, load_orders
+from route_order import START, _cache_key
 
 # A route that leaves more than this many minutes before the driver's trip
 # is back was added to that trip on the way (less: rounded times, a new trip).
 OVERLAP_TOLERANCE_MIN = 5
 # Times before this hour are taken as afternoon times typed without "pm".
 EARLIEST_HOUR = 6
-KM_PER_MILE = 1.609344
+METRES_PER_MILE = 1609.344
+# For a leg Google wasn't asked for (e.g. between two routes driven in one
+# trip): the straight-line distance times this.
+DETOUR = 1.3
 
 
 class Trip:
@@ -80,7 +91,7 @@ class Trip:
         self.routes: List[str] = []
         self.stops = 0
         self.bags = 0
-        self.km: Optional[float] = 0.0
+        self.miles: Optional[float] = None  # round trip from the lot (see trip_miles)
         self.expected: Optional[float] = None
         # (time out, routes, stops, bags) for each departure in the trip.
         self.legs: List[Tuple[Optional[int], List[str], int, int]] = []
@@ -111,7 +122,6 @@ class Trip:
         self.routes += other.routes
         self.stops += other.stops
         self.bags += other.bags
-        self.km = self.km + other.km if self.km is not None and other.km is not None else None
         self.time_in = max(self.time_in, other.time_in)
 
 
@@ -203,27 +213,62 @@ def route_sizes(path: str) -> Dict[str, Tuple[int, int]]:
     return sizes
 
 
-def route_km(stop_order: Optional[str]) -> Dict[str, float]:
-    """{route: km from the start to its last stop} from ``stop_order.json``."""
+def load_stops(stop_order: Optional[str]) -> Dict[str, List[Tuple[float, float]]]:
+    """{route: its stops' locations, in stop order} from ``stop_order.json``."""
     if not stop_order or not os.path.exists(stop_order):
         return {}
     with open(stop_order, encoding="utf-8") as f:
         routes = json.load(f)["routes"]
-    km: Dict[str, float] = {}
-    for route, stops in routes.items():
-        legs = [s.get("km_from_previous") for s in stops]
-        if legs and all(leg is not None for leg in legs):
-            km[route] = sum(legs)
-    return km
+    return {route: [(s["lat"], s["lng"]) for s in stops]
+            for route, stops in routes.items() if all(s.get("lat") is not None for s in stops)}
+
+
+def load_distances(path: Optional[str]) -> Dict[str, Dict]:
+    """Google's driving distances saved by ``route_order.py`` (``driving_distances.json``)."""
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _straight_metres(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    dy = (a[0] - b[0]) * 111_000
+    dx = (a[1] - b[1]) * 111_000 * math.cos(math.radians(a[0]))
+    return math.hypot(dx, dy)
+
+
+def trip_miles(trip: "Trip", stops: Dict[str, List[Tuple[float, float]]],
+               distances: Dict[str, Dict]) -> Tuple[Optional[float], int, int]:
+    """The trip's round trip: from the lot through every stop and back.
+
+    The routes are driven in the order they went out, each in its stop order.
+    Returns (miles, legs, legs estimated), or (None, 0, 0) if a route has no
+    stop order.  A leg Google wasn't asked for is the straight-line distance
+    times ``DETOUR``.
+    """
+    points = [START]
+    for _, routes, _, _ in trip.legs:
+        for route in routes:
+            if route not in stops:
+                return None, 0, 0
+            points += stops[route]
+    points.append(START)
+    metres, estimated = 0.0, 0
+    for a, b in zip(points, points[1:]):
+        known = distances.get(_cache_key(a, b))
+        if known:
+            metres += known["m"]
+        else:
+            metres += _straight_metres(a, b) * DETOUR
+            estimated += 1
+    return metres / METRES_PER_MILE, len(points) - 1, estimated
 
 
 def _orders(n: int) -> str:
     return f"{n} order" + ("" if n == 1 else "s")
 
 
-def build_trips(
-    log: List[Dict], sizes: Dict[str, Tuple[int, int]], km: Dict[str, float]
-) -> Tuple[List[Trip], List[str]]:
+def build_trips(log: List[Dict], sizes: Dict[str, Tuple[int, int]]) -> Tuple[List[Trip], List[str]]:
     """Group the logged routes into trips; return (trips, problems in the log)."""
     problems: List[str] = []
     logged = []
@@ -277,7 +322,6 @@ def build_trips(
         trip.routes.append(route)
         trip.stops += stops
         trip.bags += bags
-        trip.km = trip.km + km[route] if trip.km is not None and route in km else None
         if t_in is not None:
             trip.time_in = max(trip.time_in or 0, t_in)
 
@@ -288,11 +332,11 @@ def build_trips(
         who = ", ".join(trip.drivers)
         if trip.time_out is None:
             back = f"Time In {clock(trip.time_in)} but " if trip.time_in is not None else ""
-            problems.append(f"{trip.label} ({who}): {back}no Time Out; left out of the per-minute numbers.")
+            problems.append(f"{trip.label} ({who}): {back}no Time Out; left out of the rates.")
         elif trip.time_in is None:
             problems.append(
                 f"{trip.label} ({who}): Time Out {clock(trip.time_out)} but no Time In; "
-                "left out of the per-minute numbers."
+                "left out of the rates."
             )
 
     for trip in trips.values():
@@ -337,18 +381,24 @@ def _solve(a: List[List[float]], b: List[float]) -> Optional[List[float]]:
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def fit_trip_minutes(trips: Sequence[Trip]) -> Optional[Dict[str, float]]:
-    """Least-squares ``minutes = base + per_stop*stops + per_bag*bags`` over the timed trips.
+TERMS = {"per_stop": lambda t: t.stops, "per_bag": lambda t: t.bags, "per_mile": lambda t: t.miles}
 
-    A term that comes out negative (too few trips to tell) is dropped and the
-    rest refitted.  Returns the coefficients and ``r2``, or None.
+
+def fit_trip_minutes(trips: Sequence[Trip]) -> Optional[Dict[str, float]]:
+    """Least-squares ``minutes = base + per_stop*stops + per_bag*bags + per_mile*miles``
+    over the timed trips.
+
+    Miles are used only if every timed trip has them (``uses_miles``).  A term
+    that comes out negative (too few trips to tell) is dropped and the rest
+    refitted.  Returns the coefficients and ``r2``, or None.
     """
     timed = [t for t in trips if t.minutes is not None]
-    terms = ["per_stop", "per_bag"]
+    uses_miles = bool(timed) and all(t.miles is not None for t in timed)
+    terms = ["per_stop", "per_bag"] + (["per_mile"] if uses_miles else [])
     while True:
         if len(timed) < len(terms) + 2:
             return None
-        xs = [[1.0] + [float(t.stops if term == "per_stop" else t.bags) for term in terms] for t in timed]
+        xs = [[1.0] + [float(TERMS[term](t)) for term in terms] for t in timed]
         ys = [float(t.minutes) for t in timed]
         k = len(terms) + 1
         ata = [[sum(x[i] * x[j] for x in xs) for j in range(k)] for i in range(k)]
@@ -360,7 +410,8 @@ def fit_trip_minutes(trips: Sequence[Trip]) -> Optional[Dict[str, float]]:
         if not negative:
             break
         terms.remove(negative[0])
-    model = {"base": coef[0], "per_stop": 0.0, "per_bag": 0.0, "trips": len(timed)}
+    model = {"base": coef[0], "per_stop": 0.0, "per_bag": 0.0, "per_mile": 0.0, "trips": len(timed),
+             "uses_miles": uses_miles}
     model.update(zip(terms, coef[1:]))
     mean = sum(ys) / len(ys)
     ss_tot = sum((y - mean) ** 2 for y in ys)
@@ -369,8 +420,9 @@ def fit_trip_minutes(trips: Sequence[Trip]) -> Optional[Dict[str, float]]:
     return model
 
 
-def expected_minutes(model: Dict[str, float], stops: int, bags: int) -> float:
-    return model["base"] + model["per_stop"] * stops + model["per_bag"] * bags
+def expected_minutes(model: Dict[str, float], stops: int, bags: int, miles: Optional[float] = None) -> float:
+    return (model["base"] + model["per_stop"] * stops + model["per_bag"] * bags
+            + (model["per_mile"] * miles if model.get("uses_miles") and miles is not None else 0.0))
 
 
 def _union_minutes(intervals: List[Tuple[int, int]]) -> int:
@@ -418,7 +470,7 @@ def driver_stats(trips: Sequence[Trip]) -> List[Dict]:
             "bags": sum(t.bags for t in driver_trips),
             "minutes": minutes,
             "bags_per_min": round_down(timed_bags / minutes) if minutes else None,
-            "stops_per_min": round_down(timed_stops / minutes) if minutes else None,
+            "stops_per_hour": round_down(timed_stops * 60 / minutes) if minutes else None,
             "min_per_stop": round_down(minutes / timed_stops) if timed_stops else None,
             "pace": round_down(expected / actual) if actual else None,
             "max_bags_trip": max(t.biggest_load for t in driver_trips),
@@ -454,6 +506,7 @@ def _num(value: Optional[float], digits: int = 2) -> str:
 
 
 def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], problems: List[str]) -> None:
+    sized = "stops, bags and miles" if model and model.get("uses_miles") else "stops and bags"
     if problems:
         print(f"DRIVER LOG PROBLEMS ({len(problems)}) - fix them in the workbook and run again:")
         for p in problems:
@@ -465,10 +518,10 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
         ("Most bags delivered", "bags", lambda r: f"{r['bags']} bags"),
         ("Most bags per minute", "bags_per_min", lambda r: f"{r['bags_per_min']:.2f} bags/min ({r['minutes']} min out)"),
         ("Most stops", "stops", lambda r: f"{r['stops']} stops"),
-        ("Most stops per minute", "stops_per_min",
-         lambda r: f"{r['stops_per_min']:.2f} stops/min = {r['min_per_stop']:.2f} min per stop ({r['minutes']} min out)"),
+        ("Most stops per hour", "stops_per_hour",
+         lambda r: f"{r['stops_per_hour']:.2f} stops/hour = {r['min_per_stop']:.2f} min per stop ({r['minutes']} min out)"),
         ("Fastest for the size of their trips", "pace",
-         lambda r: f"pace {r['pace']:.2f} (1.00 = the typical time for the same stops and bags)"),
+         lambda r: f"pace {r['pace']:.2f} (1.00 = the typical time for the same {sized})"),
     ]
     for n, (question, key, describe) in enumerate(questions, start=1):
         leaders = _leaders(drivers, key)
@@ -476,29 +529,29 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
         print(f"  {n}. {question}: {answer}")
     print()
 
-    print("DRIVERS (by bags; per-minute numbers count only trips with both times)")
+    print("DRIVERS (by bags; the rates count only trips with both times)")
     rows = sorted(drivers, key=lambda r: (-r["bags"], r["driver"].lower()))
     _table(
-        ["Driver", "Trips", "Stops", "Bags", "Min out", "Bags/min", "Stops/min", "Min/stop", "Pace",
+        ["Driver", "Trips", "Stops", "Bags", "Min out", "Bags/min", "Stops/hour", "Min/stop", "Pace",
          "Biggest load", "Out", "Back", "Reload min"],
         [[
             r["driver"],
             f"{r['trips']}" + ("" if r["timed_trips"] == r["trips"] else f" ({r['timed_trips']} timed)"),
             str(r["stops"]), str(r["bags"]), str(r["minutes"] or ""),
-            _num(r["bags_per_min"]), _num(r["stops_per_min"]), _num(r["min_per_stop"]), _num(r["pace"]),
+            _num(r["bags_per_min"]), _num(r["stops_per_hour"]), _num(r["min_per_stop"]), _num(r["pace"]),
             f"{r['max_bags_trip']} bags", clock(r["first_out"]), clock(r["last_in"]), _num(r["reload_min"], 0),
         ] for r in rows],
         [False, True, True, True, True, True, True, True, True, True, True, True, True],
     )
     print()
 
-    print("TRIPS (miles: start to last stop of each route, from the stop order; added up for several routes)")
+    print("TRIPS (miles: round trip from the lot through every stop, in stop order)")
     _table(
         ["Driver", "Routes", "Out", "Back", "Min", "Expected", "Stops", "Bags", "Miles"],
         [[
             ", ".join(t.drivers), t.label, clock(t.time_out), clock(t.time_in), str(t.minutes or ""),
             _num(t.expected, 0), str(t.stops), str(t.bags),
-            "" if t.km is None else f"{t.km / KM_PER_MILE:.1f}",
+            _num(t.miles, 1),
         ] for t in trips],
         [False, False, True, True, True, True, True, True, True],
     )
@@ -506,15 +559,31 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
 
     print("FOR ASSIGNING ROUTES NEXT SEASON")
     if model:
+        fitted = f"fitted on {model['trips']} timed trips, R² {model['r2']:.2f}"
+        if model["uses_miles"]:
+            print(
+                f"  - A typical trip took {model['base']:.0f} min, plus {model['per_stop']:.1f} min per stop, "
+                f"{model['per_bag'] * 10:.1f} min per 10 bags and {model['per_mile']:.1f} min per mile driven "
+                f"({fitted}). Use it to size routes: e.g. 6 stops, 100 bags and 5 miles ≈ "
+                f"{expected_minutes(model, 6, 100, 5):.0f} min."
+            )
+        else:
+            print(
+                f"  - A typical trip took {model['base']:.0f} min, plus {model['per_stop']:.1f} min per stop and "
+                f"{model['per_bag'] * 10:.1f} min per 10 bags ({fitted}; no stop order for every trip, so the "
+                f"miles driven aren't counted). Use it to size routes: e.g. 6 stops and 100 bags ≈ "
+                f"{expected_minutes(model, 6, 100):.0f} min."
+            )
+        if model.get("estimated_legs"):
+            print(
+                f"  - Miles: {model['estimated_legs']} of {model['legs']} legs weren't in Google's driving distances "
+                f"(e.g. between two routes in one trip), so they are the straight-line distance + "
+                f"{(DETOUR - 1) * 100:.0f}%."
+            )
         print(
-            f"  - A typical trip took {model['base']:.0f} min, plus {model['per_stop']:.1f} min per stop and "
-            f"{model['per_bag'] * 10:.1f} min per 10 bags (fitted on {model['trips']} timed trips, "
-            f"R² {model['r2']:.2f}). Use it to size routes: e.g. 6 stops and 100 bags ≈ "
-            f"{expected_minutes(model, 6, 100):.0f} min."
-        )
-        print(
-            "  - Pace compares each driver's time with that typical time for the same stops and bags "
-            "(over 1.00 = faster), so it is fairer than raw bags/min between big-order and small-order routes."
+            f"  - Pace compares each driver's time with that typical time for the same {sized} "
+            "(over 1.00 = faster), so it is fairer than raw bags/min between big-order and small-order routes, "
+            "and between near and far stops."
         )
     print("  - Biggest load: the most bags a driver took out at once, a guide to their truck or trailer size.")
     print("  - A route taken out before the driver's trip was back was added to that trip on the way "
@@ -528,7 +597,7 @@ def write_csv(directory: str, trips: List[Trip], drivers: List[Dict]) -> None:
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, "drivers.csv"), "w", newline="", encoding="utf-8") as f:
         fields = ["driver", "routes", "trips", "timed_trips", "stops", "bags", "minutes", "bags_per_min",
-                  "stops_per_min", "min_per_stop", "pace", "max_bags_trip", "max_stops_trip", "first_out",
+                  "stops_per_hour", "min_per_stop", "pace", "max_bags_trip", "max_stops_trip", "first_out",
                   "last_in", "reload_min"]
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -544,7 +613,7 @@ def write_csv(directory: str, trips: List[Trip], drivers: List[Dict]) -> None:
             w.writerow([
                 "; ".join(t.drivers), "; ".join(t.routes), clock(t.time_out), clock(t.time_in),
                 "" if t.minutes is None else t.minutes, _num(t.expected, 1), t.stops, t.bags,
-                "" if t.km is None else f"{t.km / KM_PER_MILE:.2f}",
+                _num(t.miles, 2),
             ])
 
 
@@ -572,15 +641,25 @@ def check_driver_log(path: str) -> List[str]:
     return problems
 
 
-def analyze(path: str, stop_order: Optional[str] = None):
-    """Return (trips, driver rows, model, problems) for a season workbook."""
+def analyze(path: str, stop_order: Optional[str] = None, distances: Optional[str] = None):
+    """Return (trips, driver rows, model, problems) for a season workbook.
+
+    ``stop_order`` and ``distances`` (from ``route_order.py``) give the miles
+    of each trip; without them the typical time leaves the miles out.
+    """
     sizes = route_sizes(path)
-    trips, problems = build_trips(load_driver_log(path), sizes, route_km(stop_order))
+    trips, problems = build_trips(load_driver_log(path), sizes)
+    stops, known = load_stops(stop_order), load_distances(distances)
+    legs = estimated = 0
+    for t in trips:
+        t.miles, n, guessed = trip_miles(t, stops, known)
+        legs, estimated = legs + n, estimated + guessed
     model = fit_trip_minutes(trips)
     if model:
+        model["legs"], model["estimated_legs"] = legs, estimated
         for t in trips:
             if t.minutes is not None:
-                t.expected = expected_minutes(model, t.stops, t.bags)
+                t.expected = expected_minutes(model, t.stops, t.bags, t.miles)
     return trips, driver_stats(trips), model, problems
 
 
@@ -589,6 +668,8 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Season workbook (.xlsx) with the driver log filled in.")
     parser.add_argument("--stop-order", default="output/stop_order.json",
                         help="Stop order from route_order.py, for the miles of each trip (optional).")
+    parser.add_argument("--distances", default="output/driving_distances.json",
+                        help="Driving distances saved by route_order.py, for the miles of each trip (optional).")
     parser.add_argument("--csv-dir", help="Also write drivers.csv and trips.csv to this directory.")
     parser.add_argument("--skip-checks", action="store_true",
                         help="Report even if routes are missing times (not recommended).")
@@ -606,7 +687,7 @@ def main() -> None:
         print("Continuing anyway (--skip-checks); the numbers guess around these.\n")
     else:
         print("Driver log check passed: every route with bags has a Time Out and a later Time In.\n")
-    trips, drivers, model, problems = analyze(args.input, args.stop_order)
+    trips, drivers, model, problems = analyze(args.input, args.stop_order, args.distances)
     report(trips, drivers, model, problems)
     if args.csv_dir:
         write_csv(args.csv_dir, trips, drivers)
