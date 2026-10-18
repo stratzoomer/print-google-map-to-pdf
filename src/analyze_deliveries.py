@@ -381,6 +381,9 @@ def _solve(a: List[List[float]], b: List[float]) -> Optional[List[float]]:
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
+# Trip sizes (stops, bags, miles) for the typical times in the report.
+EXAMPLE_TRIPS = [(3, 40, 4), (6, 100, 6), (12, 200, 8)]
+
 TERMS = {"per_stop": lambda t: t.stops, "per_bag": lambda t: t.bags, "per_mile": lambda t: t.miles}
 
 
@@ -417,7 +420,17 @@ def fit_trip_minutes(trips: Sequence[Trip]) -> Optional[Dict[str, float]]:
     ss_tot = sum((y - mean) ** 2 for y in ys)
     ss_res = sum((y - sum(c * x for c, x in zip(coef, row))) ** 2 for row, y in zip(xs, ys))
     model["r2"] = 1 - ss_res / ss_tot if ss_tot else 0.0
+    model["stops_bags_corr"] = _correlation([t.stops for t in timed], [t.bags for t in timed])
     return model
+
+
+def _correlation(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
+    """Pearson correlation of two equally long sequences (None if either is constant)."""
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    va, vb = sum((x - ma) ** 2 for x in a), sum((y - mb) ** 2 for y in b)
+    if not va or not vb:
+        return None
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / math.sqrt(va * vb)
 
 
 def expected_minutes(model: Dict[str, float], stops: int, bags: int, miles: Optional[float] = None) -> float:
@@ -559,20 +572,20 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
 
     print("FOR ASSIGNING ROUTES NEXT SEASON")
     if model:
-        fitted = f"fitted on {model['trips']} timed trips, R² {model['r2']:.2f}"
+        fitted = f"fitted on {model['trips']} timed trips; it explains {model['r2'] * 100:.0f}% of the differences"
+        print(f"  - Typical trip times this season ({fitted}), to size routes:")
+        for stops, bags, miles in EXAMPLE_TRIPS:
+            size = f"{stops} stops, {bags} bags" + (f", {miles} miles" if model["uses_miles"] else "")
+            print(f"      {size}: about {expected_minutes(model, stops, bags, miles):.0f} min")
         if model["uses_miles"]:
-            print(
-                f"  - A typical trip took {model['base']:.0f} min, plus {model['per_stop']:.1f} min per stop, "
-                f"{model['per_bag'] * 10:.1f} min per 10 bags and {model['per_mile']:.1f} min per mile driven "
-                f"({fitted}). Use it to size routes: e.g. 6 stops, 100 bags and 5 miles ≈ "
-                f"{expected_minutes(model, 6, 100, 5):.0f} min."
-            )
+            print(f"    Each mile driven (round trip from the lot) adds about {model['per_mile']:.1f} min.")
         else:
+            print("    No stop order for every trip, so the miles driven aren't counted.")
+        corr = model.get("stops_bags_corr")
+        if corr is not None and corr >= 0.7:
             print(
-                f"  - A typical trip took {model['base']:.0f} min, plus {model['per_stop']:.1f} min per stop and "
-                f"{model['per_bag'] * 10:.1f} min per 10 bags ({fitted}; no stop order for every trip, so the "
-                f"miles driven aren't counted). Use it to size routes: e.g. 6 stops and 100 bags ≈ "
-                f"{expected_minutes(model, 6, 100):.0f} min."
+                f"    Trips with more stops also carry more bags (correlation {corr:.2f}), so the time per stop "
+                "and per bag can't be told apart: use the trip times above, not a time per stop."
             )
         if model.get("estimated_legs"):
             print(

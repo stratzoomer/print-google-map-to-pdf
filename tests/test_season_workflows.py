@@ -526,6 +526,9 @@ class AfterDeliveryTests(unittest.TestCase):
         drivers = list(self.drivers.values())
         _, out = quiet(analyze_deliveries.report, self.trips, drivers, self.model, self.problems)
         self.assertNotIn("DRIVER LOG PROBLEMS", out)
+        self.assertIn("Typical trip times this season", out)
+        self.assertIn("can't be told apart", out)  # stops and bags rise together
+        self.assertNotIn("min per stop,", out)
         self.assertIn("1. Most bags delivered:", out)
         with tempfile.TemporaryDirectory() as tmp:
             analyze_deliveries.write_csv(tmp, self.trips, drivers)

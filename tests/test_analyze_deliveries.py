@@ -210,6 +210,11 @@ class HelperTests(unittest.TestCase):
         trips[0].miles = None
         self.assertFalse(ad.fit_trip_minutes(trips)["uses_miles"])
 
+    def test_correlation(self):
+        self.assertAlmostEqual(ad._correlation([1, 2, 3], [2, 4, 6]), 1)
+        self.assertAlmostEqual(ad._correlation([1, 2, 3], [3, 2, 1]), -1)
+        self.assertIsNone(ad._correlation([1, 1, 1], [1, 2, 3]))
+
     def test_trip_miles(self):
         start, a, b = route_order.START, (38.82, -77.31), (38.83, -77.31)
         key = route_order._cache_key
