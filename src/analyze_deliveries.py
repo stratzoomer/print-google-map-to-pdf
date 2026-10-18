@@ -48,6 +48,7 @@ Usage::
 import argparse
 import csv
 import datetime
+import decimal
 import json
 import os
 import re
@@ -384,6 +385,12 @@ def _union_minutes(intervals: List[Tuple[int, int]]) -> int:
     return total
 
 
+def round_down(value: float, places: int = 2) -> float:
+    """``value`` rounded down to ``places`` decimals (1.6033 -> 1.6, 0.0999 -> 0.09)."""
+    step = decimal.Decimal(1).scaleb(-places)
+    return float(decimal.Decimal(repr(value)).quantize(step, rounding=decimal.ROUND_FLOOR))
+
+
 def driver_stats(trips: Sequence[Trip]) -> List[Dict]:
     """One row per driver (see the module docstring)."""
     names: Dict[str, str] = {}
@@ -410,10 +417,10 @@ def driver_stats(trips: Sequence[Trip]) -> List[Dict]:
             "stops": sum(t.stops for t in driver_trips),
             "bags": sum(t.bags for t in driver_trips),
             "minutes": minutes,
-            "bags_per_min": timed_bags / minutes if minutes else None,
-            "stops_per_min": timed_stops / minutes if minutes else None,
-            "min_per_stop": minutes / timed_stops if timed_stops else None,
-            "pace": expected / actual if actual else None,
+            "bags_per_min": round_down(timed_bags / minutes) if minutes else None,
+            "stops_per_min": round_down(timed_stops / minutes) if minutes else None,
+            "min_per_stop": round_down(minutes / timed_stops) if timed_stops else None,
+            "pace": round_down(expected / actual) if actual else None,
             "max_bags_trip": max(t.biggest_load for t in driver_trips),
             "max_stops_trip": max(t.stops for t in driver_trips),
             "first_out": min((t.time_out for t in timed), default=None),
@@ -459,9 +466,9 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
         ("Most bags per minute", "bags_per_min", lambda r: f"{r['bags_per_min']:.2f} bags/min ({r['minutes']} min out)"),
         ("Most stops", "stops", lambda r: f"{r['stops']} stops"),
         ("Most stops per minute", "stops_per_min",
-         lambda r: f"{r['stops_per_min']:.3f} stops/min = {r['min_per_stop']:.1f} min per stop ({r['minutes']} min out)"),
+         lambda r: f"{r['stops_per_min']:.2f} stops/min = {r['min_per_stop']:.2f} min per stop ({r['minutes']} min out)"),
         ("Fastest for the size of their trips", "pace",
-         lambda r: f"{r['pace'] * 100:.0f}% of the typical time for the same stops and bags"),
+         lambda r: f"pace {r['pace']:.2f} (1.00 = the typical time for the same stops and bags)"),
     ]
     for n, (question, key, describe) in enumerate(questions, start=1):
         leaders = _leaders(drivers, key)
@@ -478,8 +485,7 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
             r["driver"],
             f"{r['trips']}" + ("" if r["timed_trips"] == r["trips"] else f" ({r['timed_trips']} timed)"),
             str(r["stops"]), str(r["bags"]), str(r["minutes"] or ""),
-            _num(r["bags_per_min"]), _num(r["stops_per_min"], 3), _num(r["min_per_stop"], 1),
-            "" if r["pace"] is None else f"{r['pace'] * 100:.0f}%",
+            _num(r["bags_per_min"]), _num(r["stops_per_min"]), _num(r["min_per_stop"]), _num(r["pace"]),
             f"{r['max_bags_trip']} bags", clock(r["first_out"]), clock(r["last_in"]), _num(r["reload_min"], 0),
         ] for r in rows],
         [False, True, True, True, True, True, True, True, True, True, True, True, True],
@@ -508,7 +514,7 @@ def report(trips: List[Trip], drivers: List[Dict], model: Optional[Dict], proble
         )
         print(
             "  - Pace compares each driver's time with that typical time for the same stops and bags "
-            "(over 100% = faster), so it is fairer than raw bags/min between big-order and small-order routes."
+            "(over 1.00 = faster), so it is fairer than raw bags/min between big-order and small-order routes."
         )
     print("  - Biggest load: the most bags a driver took out at once, a guide to their truck or trailer size.")
     print("  - A route taken out before the driver's trip was back was added to that trip on the way "

@@ -62,8 +62,9 @@ class AnalyzeDeliveriesTests(unittest.TestCase):
         self.assertEqual(problems, [])
         ann, bo = drivers["Ann"], drivers["Bo"]
         self.assertEqual((ann["trips"], ann["stops"], ann["bags"], ann["minutes"]), (2, 4, 41, 90))
-        self.assertAlmostEqual(ann["bags_per_min"], 41 / 90)
-        self.assertAlmostEqual(ann["stops_per_min"], 4 / 90)
+        self.assertEqual(ann["bags_per_min"], 0.45)  # 0.4555...
+        self.assertEqual(ann["stops_per_min"], 0.04)  # 0.0444...
+        self.assertEqual(ann["min_per_stop"], 22.5)
         self.assertEqual(ann["reload_min"], 10)
         self.assertEqual((bo["bags"], bo["minutes"], bo["max_bags_trip"]), (40, 20, 40))
 
@@ -181,6 +182,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(ad.minutes_of("1:15"), 795)  # no am/pm before 6:00: afternoon
         self.assertIsNone(ad.minutes_of("soon"))
         self.assertIsNone(ad.minutes_of(None))
+
+    def test_round_down(self):
+        self.assertEqual(ad.round_down(1.6033), 1.6)
+        self.assertEqual(ad.round_down(0.0999), 0.09)
+        self.assertEqual(ad.round_down(1.15), 1.15)  # not 1.14 (1.15 * 100 = 114.999...)
+        self.assertEqual(ad.round_down(26.199), 26.19)
 
     def test_split_drivers(self):
         self.assertEqual(ad.split_drivers("Ann / Bo & Cy and Di"), ("Ann", "Bo", "Cy", "Di"))

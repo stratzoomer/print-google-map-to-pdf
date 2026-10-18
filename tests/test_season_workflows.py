@@ -497,7 +497,8 @@ class AfterDeliveryTests(unittest.TestCase):
         self.assertEqual(leader("bags_per_min"), top)
         self.assertEqual(leader("stops"), top)
         self.assertEqual(leader("stops_per_min"), top)
-        self.assertAlmostEqual(self.drivers[top[0]]["bags_per_min"], 473 / 295)
+        self.assertEqual(self.drivers[top[0]]["bags_per_min"], 1.6)  # 473 / 295 = 1.603...
+        self.assertEqual(self.drivers[top[0]]["stops_per_min"], 0.1)  # 30 / 295 = 0.1016...
         self.assertEqual(self.drivers[top[0]]["minutes"], 295)
 
     def test_trip_model(self):
